@@ -3,7 +3,7 @@
  * Plugin Name: ideaBot
  * Plugin URI:  https://ideaboss.io
  * Description: ideaBot by ideaBoss — a conversational lead qualification chat widget. Walks visitors through a guided discovery conversation, captures qualified leads, and sends personalized follow-up emails automatically.
- * Version:     1.0.4
+ * Version:     1.0.5
  * Author:      ideaBoss / Cox Group
  * Author URI:  https://ideaboss.io
  * License:     GPL v2 or later
@@ -12,7 +12,7 @@
 
 if ( ! defined( 'ABSPATH' ) ) exit;
 
-define( 'IDEABOT_VERSION',     '1.0.4' );
+define( 'IDEABOT_VERSION',     '1.0.5' );
 define( 'IDEABOT_DB_VER',      '1.0.1' );
 define( 'IDEABOT_DIR',         plugin_dir_path( __FILE__ ) );
 define( 'IDEABOT_URL',         plugin_dir_url( __FILE__ ) );
@@ -470,6 +470,82 @@ function ideabot_delete_lead() {
         wp_send_json_success( [ 'message' => 'Lead deleted.' ] );
     } else {
         wp_send_json_error( [ 'message' => 'Could not delete lead.' ] );
+    }
+}
+
+// ================================================================
+// AJAX — ADMIN: send test email (captures wp_mail errors)
+// ================================================================
+add_action( 'wp_ajax_ideabot_test_email', 'ideabot_test_email' );
+function ideabot_test_email() {
+    check_ajax_referer( 'ideabot_admin_nonce', 'nonce' );
+    if ( ! current_user_can( 'manage_options' ) ) wp_send_json_error( [ 'message' => 'Unauthorized.' ] );
+
+    $send_to = sanitize_email( wp_unslash( $_POST['send_to'] ?? '' ) );
+    if ( ! is_email( $send_to ) ) {
+        wp_send_json_error( [ 'message' => 'Invalid "send to" address.' ] );
+    }
+
+    // Capture any wp_mail failure with its exact error message
+    $mail_error = null;
+    $error_handler = function( $wp_error ) use ( &$mail_error ) {
+        $mail_error = $wp_error->get_error_message();
+    };
+    add_action( 'wp_mail_failed', $error_handler );
+
+    $from_name  = ideabot_get( 'from_name',  'ideaBoss' );
+    $from_email = ideabot_get( 'from_email', '' );
+    $reply_to   = ideabot_get( 'reply_to',   '' );
+    $accent     = ideabot_get( 'accent_color', '#00C2FF' );
+
+    $headers = [ 'Content-Type: text/html; charset=UTF-8' ];
+    if ( $reply_to ) $headers[] = 'Reply-To: ' . $reply_to;
+
+    $body = "<!DOCTYPE html><html><body style='font-family:Arial,sans-serif;background:#f0f0f0;padding:30px;'>
+<table width='500' cellpadding='0' cellspacing='0' style='background:#fff;border-radius:8px;overflow:hidden;margin:0 auto;'>
+  <tr><td style='background:#0a0a0a;padding:20px 28px;border-bottom:3px solid {$accent};'>
+    <span style='font-size:20px;font-weight:800;color:{$accent};'>💡 ideaBot</span>
+    <span style='font-size:11px;color:#555;margin-left:10px;'>Test Email</span>
+  </td></tr>
+  <tr><td style='padding:28px;'>
+    <p style='margin:0 0 16px;font-size:16px;font-weight:700;color:#111;'>✅ Your email is working!</p>
+    <p style='margin:0 0 12px;font-size:14px;color:#444;line-height:1.6;'>This is a test sent from <strong>ideaBot</strong> on <strong>" . esc_html( get_bloginfo('name') ) . "</strong>.</p>
+    <table width='100%' cellpadding='0' cellspacing='0' style='background:#f8f9fa;border-radius:6px;margin:16px 0;'>
+      <tr><td style='padding:14px 18px;font-size:13px;color:#555;line-height:1.8;'>
+        <strong>Sent to:</strong> {$send_to}<br>
+        <strong>From name:</strong> " . esc_html( $from_name ) . "<br>
+        <strong>From email:</strong> " . ( $from_email ? esc_html( $from_email ) : '<em>Mailgun default</em>' ) . "<br>
+        <strong>Reply-To:</strong> " . ( $reply_to ? esc_html( $reply_to ) : '<em>not set</em>' ) . "<br>
+        <strong>Time:</strong> " . current_time( 'F j, Y \a\t g:i:s a' ) . "
+      </td></tr>
+    </table>
+    <p style='margin:0;font-size:13px;color:#aaa;'>If you received this, Mailgun and ideaBot are connected correctly.</p>
+  </td></tr>
+  <tr><td style='background:#0a0a0a;padding:12px 28px;text-align:center;'>
+    <span style='font-size:11px;color:#555;'>ideaBoss® · <a href='https://ideaboss.io' style='color:{$accent};text-decoration:none;'>ideaboss.io</a></span>
+  </td></tr>
+</table></body></html>";
+
+    $sent = wp_mail( $send_to, '✅ ideaBot Test Email — ' . get_bloginfo('name'), $body, $headers );
+
+    remove_action( 'wp_mail_failed', $error_handler );
+
+    if ( $sent ) {
+        wp_send_json_success( [
+            'message' => "✅ Email sent to {$send_to}. Check your inbox (and spam folder).",
+            'details' => [
+                'to'         => $send_to,
+                'from_name'  => $from_name,
+                'from_email' => $from_email ?: 'Mailgun default',
+                'reply_to'   => $reply_to ?: 'not set',
+            ],
+        ] );
+    } else {
+        wp_send_json_error( [
+            'message' => '❌ wp_mail() returned false — email was not sent.',
+            'error'   => $mail_error ?: 'No specific error captured. Check your Mailgun plugin settings and domain verification.',
+            'hint'    => 'Common causes: Mailgun API key wrong, sending domain not verified, or "Send via" set to SMTP with a blocked port.',
+        ] );
     }
 }
 
@@ -1341,6 +1417,21 @@ function ideabot_settings_page() {
                         <div class="ib-desc">Appears as "Talk soon, [name]" in the email.</div></div>
                     </div>
                 </div>
+
+                <!-- TEST EMAIL -->
+                <div class="ib-section"><h3>🧪 Test Email</h3>
+                    <div class="ib-row">
+                        <div class="ib-label">Send To<span class="ib-sublabel">Test address</span></div>
+                        <div>
+                            <div style="display:flex;gap:8px;align-items:center;max-width:450px;">
+                                <input type="email" id="ib-test-email-addr" placeholder="you@example.com" style="flex:1;">
+                                <button type="button" id="ib-test-email-btn" class="button button-secondary" style="white-space:nowrap;">📨 Send Test</button>
+                            </div>
+                            <div class="ib-desc">Fires a real <code>wp_mail()</code> call using your current settings. Shows the exact error if it fails.</div>
+                            <div id="ib-test-result" style="display:none;margin-top:10px;padding:12px 16px;border-radius:6px;font-size:13px;line-height:1.6;"></div>
+                        </div>
+                    </div>
+                </div>
             </div></div>
 
             <!-- ======================== DISPLAY ======================== -->
@@ -1410,6 +1501,7 @@ function ideabot_settings_page() {
 
     <script>
     (function(){
+        // Tab switching
         var tabs   = document.querySelectorAll('.ib-tab');
         var panels = document.querySelectorAll('.ib-panel');
         tabs.forEach(function(tab){
@@ -1419,6 +1511,60 @@ function ideabot_settings_page() {
                 this.classList.add('active');
                 var el = document.getElementById('panel-' + this.dataset.panel);
                 if (el) el.classList.add('active');
+            });
+        });
+
+        // Test email
+        document.getElementById('ib-test-email-btn').addEventListener('click', function(){
+            var addr   = document.getElementById('ib-test-email-addr').value.trim();
+            var result = document.getElementById('ib-test-result');
+            if (!addr) { alert('Enter an email address first.'); return; }
+
+            this.disabled = true;
+            this.textContent = 'Sending…';
+            result.style.display = 'none';
+
+            var btn = this;
+            var fd  = new FormData();
+            fd.append('action',  'ideabot_test_email');
+            fd.append('nonce',   '<?php echo esc_js( wp_create_nonce("ideabot_admin_nonce") ); ?>');
+            fd.append('send_to', addr);
+
+            fetch('<?php echo esc_js( admin_url("admin-ajax.php") ); ?>', {
+                method: 'POST', body: fd, credentials: 'same-origin'
+            })
+            .then(function(r){ return r.json(); })
+            .then(function(res){
+                btn.disabled    = false;
+                btn.textContent = '📨 Send Test';
+                result.style.display = 'block';
+
+                if (res.success) {
+                    result.style.background = '#e8f5e9';
+                    result.style.border     = '1px solid #a5d6a7';
+                    result.style.color      = '#1b5e20';
+                    result.innerHTML = '<strong>' + res.data.message + '</strong>'
+                        + '<br><br><small>From name: <code>' + res.data.details.from_name + '</code> &nbsp;|&nbsp; '
+                        + 'From email: <code>' + res.data.details.from_email + '</code> &nbsp;|&nbsp; '
+                        + 'Reply-To: <code>' + res.data.details.reply_to + '</code></small>';
+                } else {
+                    result.style.background = '#ffebee';
+                    result.style.border     = '1px solid #ef9a9a';
+                    result.style.color      = '#b71c1c';
+                    var errMsg = '<strong>' + (res.data.message || 'Send failed.') + '</strong>';
+                    if (res.data.error)  errMsg += '<br><br><strong>Error:</strong> ' + res.data.error;
+                    if (res.data.hint)   errMsg += '<br><strong>Hint:</strong> ' + res.data.hint;
+                    result.innerHTML = errMsg;
+                }
+            })
+            .catch(function(){
+                btn.disabled    = false;
+                btn.textContent = '📨 Send Test';
+                result.style.display     = 'block';
+                result.style.background  = '#ffebee';
+                result.style.border      = '1px solid #ef9a9a';
+                result.style.color       = '#b71c1c';
+                result.textContent       = 'Network error — could not reach admin-ajax.php.';
             });
         });
     })();
