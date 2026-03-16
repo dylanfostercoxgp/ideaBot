@@ -3,7 +3,7 @@
  * Plugin Name: ideaBot
  * Plugin URI:  https://ideaboss.io
  * Description: ideaBot by ideaBoss — a conversational lead qualification chat widget. Walks visitors through a guided discovery conversation, captures qualified leads, and sends personalized follow-up emails automatically.
- * Version:     1.0.3
+ * Version:     1.0.4
  * Author:      ideaBoss / Cox Group
  * Author URI:  https://ideaboss.io
  * License:     GPL v2 or later
@@ -12,7 +12,7 @@
 
 if ( ! defined( 'ABSPATH' ) ) exit;
 
-define( 'IDEABOT_VERSION',     '1.0.3' );
+define( 'IDEABOT_VERSION',     '1.0.4' );
 define( 'IDEABOT_DB_VER',      '1.0.1' );
 define( 'IDEABOT_DIR',         plugin_dir_path( __FILE__ ) );
 define( 'IDEABOT_URL',         plugin_dir_url( __FILE__ ) );
