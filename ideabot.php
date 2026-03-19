@@ -3,7 +3,7 @@
  * Plugin Name: ideaBot
  * Plugin URI:  https://ideaboss.io
  * Description: ideaBot by ideaBoss — a conversational lead qualification chat widget. Walks visitors through a guided discovery conversation, captures qualified leads, and sends personalized follow-up emails automatically.
- * Version:     1.1.0
+ * Version:     1.1.1
  * Author:      ideaBoss / Cox Group
  * Author URI:  https://ideaboss.io
  * License:     GPL v2 or later
@@ -12,7 +12,7 @@
 
 if ( ! defined( 'ABSPATH' ) ) exit;
 
-define( 'IDEABOT_VERSION',     '1.1.0' );
+define( 'IDEABOT_VERSION',     '1.1.1' );
 define( 'IDEABOT_DB_VER',      '1.0.1' );
 define( 'IDEABOT_DIR',         plugin_dir_path( __FILE__ ) );
 define( 'IDEABOT_URL',         plugin_dir_url( __FILE__ ) );
@@ -218,6 +218,11 @@ function ideabot_defaults() {
         'webhook_enabled'       => '0',
         'webhook_url'           => '',
         'webhook_secret'        => '',
+        // Auto-Deploy
+        'deploy_enabled'        => '0',
+        'deploy_github_token'   => '',
+        'deploy_github_repo'    => 'dylanfostercoxgp/ideaBot',
+        'deploy_secret'         => '',   // HMAC secret — auto-generated on first use
         // AI / Chat
         'anthropic_api_key'     => '',
         'ai_model'              => 'claude-haiku-4-5-20251001',
@@ -1048,6 +1053,132 @@ function ideabot_fire_webhook( $data ) {
 }
 
 // ================================================================
+// GITHUB AUTO-DEPLOY — REST API Webhook
+// Receives GitHub push events and deploys the latest plugin zip.
+// Endpoint: POST /wp-json/ideabot/v1/deploy
+// ================================================================
+add_action( 'rest_api_init', 'ideabot_register_deploy_endpoint' );
+function ideabot_register_deploy_endpoint() {
+    register_rest_route( 'ideabot/v1', '/deploy', [
+        'methods'             => 'POST',
+        'callback'            => 'ideabot_deploy_webhook',
+        'permission_callback' => '__return_true',
+    ] );
+}
+
+function ideabot_deploy_webhook( WP_REST_Request $request ) {
+    if ( ideabot_get( 'deploy_enabled', '0' ) !== '1' ) {
+        return new WP_REST_Response( [ 'error' => 'Auto-deploy is disabled.' ], 403 );
+    }
+
+    // Verify HMAC signature from GitHub
+    $secret = ideabot_get( 'deploy_secret', '' );
+    if ( ! empty( $secret ) ) {
+        $sig_header = $request->get_header( 'x-hub-signature-256' );
+        if ( empty( $sig_header ) ) {
+            return new WP_REST_Response( [ 'error' => 'Missing x-hub-signature-256 header.' ], 401 );
+        }
+        $raw_body = $request->get_body();
+        $expected = 'sha256=' . hash_hmac( 'sha256', $raw_body, $secret );
+        if ( ! hash_equals( $expected, $sig_header ) ) {
+            return new WP_REST_Response( [ 'error' => 'Invalid signature — secret mismatch.' ], 401 );
+        }
+    }
+
+    // Only deploy on pushes to the main branch
+    $payload = $request->get_json_params();
+    $ref     = isset( $payload['ref'] ) ? $payload['ref'] : '';
+    if ( ! empty( $ref ) && $ref !== 'refs/heads/main' ) {
+        return new WP_REST_Response( [ 'message' => 'Not a main branch push — skipped.' ], 200 );
+    }
+
+    $token = ideabot_get( 'deploy_github_token', '' );
+    $repo  = ideabot_get( 'deploy_github_repo', 'dylanfostercoxgp/ideaBot' );
+    $repo  = trim( $repo );
+
+    // Download the latest zipball from GitHub
+    $zip_url = 'https://api.github.com/repos/' . $repo . '/zipball/main';
+    $dl_args = [
+        'timeout'  => 60,
+        'headers'  => [
+            'Accept'     => 'application/vnd.github.v3+json',
+            'User-Agent' => 'WordPress/' . get_bloginfo( 'version' ) . '; ideaBot-deploy',
+        ],
+    ];
+    if ( $token ) {
+        $dl_args['headers']['Authorization'] = 'token ' . $token;
+    }
+
+    $response = wp_remote_get( $zip_url, $dl_args );
+
+    if ( is_wp_error( $response ) ) {
+        return new WP_REST_Response( [ 'error' => 'Download failed: ' . $response->get_error_message() ], 500 );
+    }
+
+    $http_code = wp_remote_retrieve_response_code( $response );
+    if ( 200 !== $http_code ) {
+        return new WP_REST_Response( [ 'error' => 'GitHub returned HTTP ' . $http_code . ' — check token and repo name.' ], 500 );
+    }
+
+    // Write zip to temp file
+    $zip_file = get_temp_dir() . 'ideabot-deploy-' . time() . '.zip';
+    $bytes    = file_put_contents( $zip_file, wp_remote_retrieve_body( $response ) ); // phpcs:ignore
+    if ( $bytes === false || $bytes === 0 ) {
+        return new WP_REST_Response( [ 'error' => 'Failed to write zip to disk.' ], 500 );
+    }
+
+    // Extract via ZipArchive
+    if ( ! class_exists( 'ZipArchive' ) ) {
+        @unlink( $zip_file );
+        return new WP_REST_Response( [ 'error' => 'ZipArchive PHP extension is not available on this server.' ], 500 );
+    }
+
+    $zip         = new ZipArchive();
+    $extract_dir = get_temp_dir() . 'ideabot-deploy-extract-' . time() . '/';
+    if ( $zip->open( $zip_file ) !== true ) {
+        @unlink( $zip_file );
+        return new WP_REST_Response( [ 'error' => 'Failed to open zip file.' ], 500 );
+    }
+    $zip->extractTo( $extract_dir );
+    $zip->close();
+    @unlink( $zip_file );
+
+    // GitHub extracts to a randomly-named sub-folder (e.g. user-repo-abc1234/) — find it
+    $dirs = glob( $extract_dir . '*', GLOB_ONLYDIR );
+    if ( empty( $dirs ) ) {
+        return new WP_REST_Response( [ 'error' => 'Could not locate extracted plugin directory inside zip.' ], 500 );
+    }
+    $extracted_folder = rtrim( $dirs[0], '/' );
+
+    // Use WP_Filesystem to move files into the live plugin directory
+    if ( ! function_exists( 'WP_Filesystem' ) ) {
+        require_once ABSPATH . 'wp-admin/includes/file.php';
+    }
+    global $wp_filesystem;
+    WP_Filesystem();
+
+    $plugin_dir = WP_PLUGIN_DIR . '/ideabot';
+
+    // Delete existing plugin folder, then move the extracted one in its place
+    if ( $wp_filesystem->is_dir( $plugin_dir ) ) {
+        $wp_filesystem->delete( $plugin_dir, true );
+    }
+    $wp_filesystem->move( $extracted_folder, $plugin_dir );
+
+    // Clean up temp extract directory
+    $wp_filesystem->delete( $extract_dir, true );
+
+    // Log the deploy timestamp
+    update_option( 'ideabot_last_deploy', current_time( 'mysql' ) );
+
+    return new WP_REST_Response( [
+        'success' => true,
+        'message' => 'ideaBot deployed successfully.',
+        'time'    => current_time( 'mysql' ),
+    ], 200 );
+}
+
+// ================================================================
 // ADMIN MENU
 // ================================================================
 add_action( 'admin_menu', 'ideabot_admin_menu' );
@@ -1310,7 +1441,7 @@ function ideabot_settings_page() {
         check_admin_referer( 'ideabot_settings' );
 
         // Checkboxes (unchecked = absent from $_POST)
-        foreach ( [ 'enabled', 'auto_open', 'hide_mobile', 'webhook_enabled' ] as $cb ) {
+        foreach ( [ 'enabled', 'auto_open', 'hide_mobile', 'webhook_enabled', 'deploy_enabled' ] as $cb ) {
             update_option( 'ideabot_' . $cb, isset( $_POST[$cb] ) ? '1' : '0' );
         }
 
@@ -1337,6 +1468,10 @@ function ideabot_settings_page() {
             'z_index'          => 'int',
             'webhook_url'        => 'url',
             'webhook_secret'     => 'text',
+            // Auto-Deploy
+            'deploy_github_token' => 'text',
+            'deploy_github_repo'  => 'text',
+            'deploy_secret'       => 'text',
             // AI
             'anthropic_api_key'  => 'text',
             'ai_model'           => 'text',
@@ -1712,6 +1847,65 @@ function ideabot_settings_page() {
                         Works with <strong>Zapier</strong>, <strong>Make</strong>, <strong>GoHighLevel</strong>, <strong>n8n</strong>, or any webhook-compatible service.
                     </div>
                 </div>
+
+                <!-- AUTO-DEPLOY -->
+                <div class="ib-section"><h3>🚀 Auto-Deploy from GitHub</h3>
+                    <?php
+                    // Auto-generate a deploy secret if one doesn't exist yet
+                    $ib_deploy_secret = ideabot_get( 'deploy_secret', '' );
+                    if ( empty( $ib_deploy_secret ) ) {
+                        $ib_deploy_secret = bin2hex( random_bytes( 20 ) );
+                        update_option( 'ideabot_deploy_secret', $ib_deploy_secret );
+                    }
+                    $ib_webhook_url  = rest_url( 'ideabot/v1/deploy' );
+                    $ib_last_deploy  = get_option( 'ideabot_last_deploy', '' );
+                    ?>
+                    <div class="ib-note">
+                        Connect your GitHub repository so that every push to <strong>main</strong> automatically updates the plugin on your site — no manual zip upload needed.
+                        <?php if ( $ib_last_deploy ) : ?>
+                        <br><br>✅ <strong>Last successful deploy:</strong> <?php echo esc_html( $ib_last_deploy ); ?>
+                        <?php endif; ?>
+                    </div>
+                    <div class="ib-row" style="margin-top:14px;">
+                        <div class="ib-label">Enable Auto-Deploy</div>
+                        <div><label><input type="checkbox" name="deploy_enabled" value="1" <?php ideabot_field_chk('deploy_enabled'); ?>> Automatically deploy when GitHub pushes to <code>main</code></label></div>
+                    </div>
+                    <div class="ib-row">
+                        <div class="ib-label">GitHub Token<span class="ib-sublabel">Personal access token</span></div>
+                        <div><input type="password" name="deploy_github_token" value="<?php echo ideabot_field_val('deploy_github_token'); ?>" placeholder="ghp_…" autocomplete="new-password">
+                        <div class="ib-desc">Generate at <a href="https://github.com/settings/tokens" target="_blank" style="color:#00C2FF;">GitHub → Settings → Developer settings → Personal access tokens</a>. Needs <strong>Contents: Read</strong> access (fine-grained) or <strong>repo</strong> scope (classic).</div></div>
+                    </div>
+                    <div class="ib-row">
+                        <div class="ib-label">GitHub Repo<span class="ib-sublabel">owner/repo-name</span></div>
+                        <div><input type="text" name="deploy_github_repo" value="<?php echo ideabot_field_val('deploy_github_repo'); ?>" placeholder="dylanfostercoxgp/ideaBot">
+                        <div class="ib-desc">The repository containing the plugin code.</div></div>
+                    </div>
+                    <div class="ib-row">
+                        <div class="ib-label">Webhook Secret<span class="ib-sublabel">HMAC signing key</span></div>
+                        <div><input type="text" name="deploy_secret" value="<?php echo esc_attr( $ib_deploy_secret ); ?>" style="font-family:monospace;font-size:12px;">
+                        <div class="ib-desc">Auto-generated for you. Paste this into the <strong>Secret</strong> field when creating the GitHub webhook below.</div></div>
+                    </div>
+                    <div class="ib-row">
+                        <div class="ib-label">Webhook URL<span class="ib-sublabel">Paste this into GitHub</span></div>
+                        <div>
+                            <div style="display:flex;gap:8px;align-items:center;max-width:450px;">
+                                <input type="text" id="ib-deploy-url" readonly value="<?php echo esc_attr( $ib_webhook_url ); ?>" style="font-family:monospace;font-size:12px;background:#f5f5f5;color:#333;">
+                                <button type="button" class="button button-secondary" id="ib-copy-deploy-url" style="white-space:nowrap;">📋 Copy</button>
+                            </div>
+                            <div class="ib-desc">This is the URL GitHub will POST to each time you push code.</div>
+                        </div>
+                    </div>
+                    <div class="ib-note" style="margin-top:12px;">
+                        <strong>Setup steps in GitHub:</strong><br>
+                        1. Go to your repo → <strong>Settings → Webhooks → Add webhook</strong><br>
+                        2. Paste the Webhook URL above as the <strong>Payload URL</strong><br>
+                        3. Set <strong>Content type</strong> to <code>application/json</code><br>
+                        4. Paste your <strong>Webhook Secret</strong> from the field above into the <strong>Secret</strong> box<br>
+                        5. Select <strong>Just the push event</strong><br>
+                        6. Click <strong>Add webhook</strong> — done ✅<br><br>
+                        From now on, every push to <code>main</code> on GitHub automatically deploys the latest code to this site.
+                    </div>
+                </div>
             </div></div>
 
             <!-- ======================== AI ======================== -->
@@ -1780,6 +1974,19 @@ function ideabot_settings_page() {
                 if (el) el.classList.add('active');
             });
         });
+
+        // Copy deploy webhook URL
+        var copyBtn = document.getElementById('ib-copy-deploy-url');
+        if (copyBtn) {
+            copyBtn.addEventListener('click', function(){
+                var el = document.getElementById('ib-deploy-url');
+                el.select();
+                document.execCommand('copy');
+                this.textContent = '✅ Copied!';
+                var btn = this;
+                setTimeout(function(){ btn.textContent = '📋 Copy'; }, 2000);
+            });
+        }
 
         // Test email
         document.getElementById('ib-test-email-btn').addEventListener('click', function(){
