@@ -3,7 +3,7 @@
  * Plugin Name: ideaBot
  * Plugin URI:  https://ideaboss.io
  * Description: ideaBot by ideaBoss — a conversational lead qualification chat widget. Walks visitors through a guided discovery conversation, captures qualified leads, and sends personalized follow-up emails automatically.
- * Version:     1.0.5
+ * Version:     1.1.0
  * Author:      ideaBoss / Cox Group
  * Author URI:  https://ideaboss.io
  * License:     GPL v2 or later
@@ -12,7 +12,7 @@
 
 if ( ! defined( 'ABSPATH' ) ) exit;
 
-define( 'IDEABOT_VERSION',     '1.0.5' );
+define( 'IDEABOT_VERSION',     '1.1.0' );
 define( 'IDEABOT_DB_VER',      '1.0.1' );
 define( 'IDEABOT_DIR',         plugin_dir_path( __FILE__ ) );
 define( 'IDEABOT_URL',         plugin_dir_url( __FILE__ ) );
@@ -218,12 +218,227 @@ function ideabot_defaults() {
         'webhook_enabled'       => '0',
         'webhook_url'           => '',
         'webhook_secret'        => '',
+        // AI / Chat
+        'anthropic_api_key'     => '',
+        'ai_model'              => 'claude-haiku-4-5-20251001',
+        'system_prompt'         => '',   // empty = use ideabot_default_system_prompt()
+        'chat_welcome'          => "Hey! 👋 I'm ideaBot — the AI assistant for ideaBoss.\n\nAsk me anything about what we do, how AI could help your business, or how we work. What's on your mind?",
+        'input_placeholder'     => 'Ask me anything…',
     ];
 }
 
 function ideabot_default( $key ) {
     $d = ideabot_defaults();
     return $d[ $key ] ?? '';
+}
+
+// ================================================================
+// DEFAULT SYSTEM PROMPT — full ideaBoss knowledge base
+// ================================================================
+function ideabot_default_system_prompt() {
+    return 'You are ideaBot, the AI assistant for ideaBoss® — an AI Creative Company powered by Cox Group (founded 1999, 26 years across 100+ industries). You help website visitors learn about ideaBoss, understand how we can help their business, and take the next step toward working with us.
+
+## YOUR PERSONALITY
+Speak with calm authority and practical optimism. Direct, not harsh. Outcome-first — connect everything to results and systems. Never hype. Never motivational fluff. Think: battle-tested operator who speaks plain truth and moves with certainty. You are not a chatbot persona — you are an extension of the ideaBoss brand.
+
+Signature phrases to use naturally:
+- "Act. Build. Repeat."
+- "Ideas only matter when you act on them."
+- "We install the mechanism."
+
+## RESPONSE GUIDELINES
+- Keep responses concise: 2–4 sentences for simple questions, up to 3 short paragraphs for complex ones
+- Use plain language. No jargon unless the visitor uses it first
+- Be warm and conversational, not robotic
+- If asked about exact pricing, say pricing is tailored to each engagement and offer to connect them with the team
+- If asked to book an appointment, direct to ideaboss.io
+- Never make up facts about ideaBoss
+
+## KNOWLEDGE BASE
+
+### Company Overview
+ideaBoss® is an AI Creative Company powered by Cox Group (est. 1999). 26 years, 100+ industries, 125+ services. Founded and led by Dylan Cox (Rodrick Cox). Tagline: "Act. Build. Repeat." Mission: turn ideas into revenue through AI agents, automation, email/CRM, and creative strategy.
+
+### Core Services
+1. **AI Agents & Automation** — Build AI agents that handle repetitive work so your team can focus on growth. Tools: custom workflows using n8n, Zapier, Keap.
+2. **AI Content & Creative** — Automated content and outreach systems that keep you visible without manual effort. Branding, campaigns, social, SEO.
+3. **Email & CRM Automation** — Smart follow-up sequences. No lead falls through the cracks. CRM setup, drip campaigns, lead scoring.
+4. **AI Assistants & Delegation** — AI assistants that carry your expertise across the business so you are not the bottleneck.
+5. **Custom AI Systems** — Custom agent systems that turn strategy into daily action automatically.
+6. **Consulting & Training** — Helping teams adopt AI with confidence. Strategy, frameworks, hands-on implementation.
+7. **Creative & Branding** — Logo, brand identity, campaigns, video, photography, copywriting, presentations.
+
+### Three-Tier Product Structure
+- **Tier 1 — The Mindset** (low cost, high volume): Templates, execution checklists, framework documents. Establishes authority. Buyers self-qualify into higher tiers.
+- **Tier 2 — The Mechanism** (mid cost, recurring): AI & Automation implementation — The ideaBoss Operating System. CRM + Zapier + n8n workflows for SMBs. Recurring monthly revenue model.
+- **Tier 3 — The Movement** (high ticket, exclusive): ideaBoss Accelerator — Branding, Strategy, Consulting & Advisory. For those who want to become market leaders.
+
+### Industries Served (100+)
+Professional Services (Law, Medical, Accounting, Consulting), Trades & Home Services (HVAC, Plumbing, Automotive, Fire Protection), Sports & Events (NASCAR, LPGA, Bass Fishing, Boat Racing, Festivals), Media & Entertainment (Music, Publishing, Talent, Magazines), Manufacturing (Marine, Industrial, Medical Equipment, Hydraulics), Financial Services (Banking, Fintech, Private Equity, Investment Banking), Real Estate & Property (Residential, Commercial, Land, Property Management), Health & Wellness (Pharmaceuticals, Therapy, Audiology, Medical Cannabis), Motorsports, Aviation (Aircraft Brokerage), Yacht & Boat Brokerage, Non-profits, Charities, Celebrities, Professional Athletes, Professional Speakers, Churches, Retailers, Energy, Renewable Energy, and 80+ more industries.
+
+### Key Problems ideaBoss Solves
+1. Inefficiencies eating time and margin → AI agents automate the repetitive work
+2. Invisible online despite real expertise → Automated content and outreach keep you visible
+3. Leads going cold from manual follow-up → Smart CRM sequences close the gap
+4. Cannot scale without cloning the founder → AI assistants carry your expertise across the business
+5. Strategy exists but execution does not → Custom agent systems turn plans into daily action
+
+### Process / How We Work
+We do not do strategy decks that sit on shelves. We install systems and measure results. Act. Build. Repeat. Action over perfection — start, iterate, improve. 26-year track record of delivering across diverse sectors, from motorsports to medical equipment to book publishing. Emphasis on momentum: consistent, purposeful moves regardless of scale.
+
+### Pricing
+Pricing is tailored to each engagement and tier. Tier 1 digital assets are low cost. Tier 2 (The Mechanism) is a recurring monthly model. Tier 3 (Accelerator) is high-ticket and exclusive. For specific pricing, the best path is to connect directly with the team at ideaboss.io.
+
+### About the Founder — Dylan Cox (Rodrick Cox)
+Dylan Cox (also known as Rodrick Cox) founded Cox Group in 1999. In 2022, he faced profound personal challenges — the loss of his oldest son and a widowmaker heart attack. His story exemplifies the ideaBoss philosophy of Resilience Through Action. His voice drives the brand: calm authority, direct truth, practical optimism. No hype. No performance. Just execution.
+
+### Brand Voice
+Direct, not harsh. Outcome-first. Practical optimism. Earned edge. Operator, not influencer. Off-brand: hype marketing, overnight results promises, motivational fluff, guru positioning. On-brand: results-driven, systems-focused, battle-tested.
+
+### Common Questions & Answers
+**Will AI replace us?** — AI amplifies human skills and enables scalable impact without replacing creativity or judgment.
+**Does this work for my industry?** — Almost certainly. We have delivered results across 100+ industries for 26 years.
+**How is ideaBoss different from a regular agency?** — We do not just deliver tactics. We build mechanisms — systems that produce revenue and run without requiring constant manual management.
+**How long to see results?** — Automation flows can be live in weeks. Full brand/strategy builds take longer. We emphasize consistent forward motion over one-time launches.
+**Is there a demo or free trial?** — Best path is to visit ideaboss.io and connect with the team directly. They will assess fit and walk through what we would build.
+
+## EMAIL COLLECTION
+After the visitor has sent 3 or more messages, naturally ask for their email so the ideaBoss team can follow up. Weave it into the conversation organically. Examples:
+- "By the way, what is the best email to send you some ideas on this?"
+- "Want me to have someone from the team reach out? What is your email?"
+- "I would love to get you some more detailed information — what email works best for you?"
+
+Only ask once. If they decline or change the subject, respect it and continue helping.
+
+## LIMITATIONS
+- You cannot book appointments — direct to ideaboss.io
+- You cannot access account or billing information
+- You do not have exact pricing — offer to connect with the team at ideaboss.io
+- If asked about something outside your knowledge, say so honestly and offer to connect them with the team';
+}
+
+// ================================================================
+// AJAX — AI CHAT (calls Anthropic Claude API)
+// ================================================================
+add_action( 'wp_ajax_ideabot_chat',        'ideabot_chat' );
+add_action( 'wp_ajax_nopriv_ideabot_chat', 'ideabot_chat' );
+
+function ideabot_chat() {
+    check_ajax_referer( 'ideabot_nonce', 'nonce' );
+
+    $message        = sanitize_text_field( wp_unslash( $_POST['message']        ?? '' ) );
+    $exchange_count = intval( $_POST['exchange_count'] ?? 0 );
+    $history_raw    = wp_unslash( $_POST['history'] ?? '[]' );
+    $history        = json_decode( $history_raw, true );
+    if ( ! is_array( $history ) ) $history = [];
+
+    if ( empty( trim( $message ) ) ) {
+        wp_send_json_error( [ 'message' => 'Empty message.' ] );
+    }
+
+    $api_key = ideabot_get( 'anthropic_api_key', '' );
+    if ( empty( $api_key ) ) {
+        wp_send_json_error( [
+            'message' => 'ideaBot is not yet configured. Please add your Anthropic API key in ideaBot Settings → AI.',
+        ] );
+    }
+
+    $model = ideabot_get( 'ai_model', 'claude-haiku-4-5-20251001' );
+
+    // System prompt: use saved custom prompt or fallback to default knowledge base
+    $saved_prompt = ideabot_get( 'system_prompt', '' );
+    $system       = ( ! empty( trim( $saved_prompt ) ) ) ? $saved_prompt : ideabot_default_system_prompt();
+
+    // Build messages array (limit to last 20 to control cost)
+    $messages   = array_merge( $history, [ [ 'role' => 'user', 'content' => $message ] ] );
+    if ( count( $messages ) > 20 ) {
+        $messages = array_slice( $messages, -20 );
+    }
+
+    $response = wp_remote_post( 'https://api.anthropic.com/v1/messages', [
+        'timeout' => 30,
+        'headers' => [
+            'Content-Type'      => 'application/json',
+            'x-api-key'         => $api_key,
+            'anthropic-version' => '2023-06-01',
+        ],
+        'body' => wp_json_encode( [
+            'model'      => $model,
+            'max_tokens' => 1024,
+            'system'     => $system,
+            'messages'   => $messages,
+        ] ),
+    ] );
+
+    if ( is_wp_error( $response ) ) {
+        wp_send_json_error( [ 'message' => 'Connection error: ' . $response->get_error_message() ] );
+    }
+
+    $code = wp_remote_retrieve_response_code( $response );
+    $body = json_decode( wp_remote_retrieve_body( $response ), true );
+
+    if ( $code !== 200 ) {
+        $err = $body['error']['message'] ?? 'API error (HTTP ' . $code . ')';
+        wp_send_json_error( [ 'message' => $err ] );
+    }
+
+    $reply = $body['content'][0]['text'] ?? '';
+
+    // Detect email in visitor's message
+    $collected_email = null;
+    if ( preg_match( '/[\w.+\-]+@[\w\-]+\.[\w.\-]+/', $message, $m ) ) {
+        $candidate = sanitize_email( $m[0] );
+        if ( is_email( $candidate ) ) {
+            $collected_email = $candidate;
+        }
+    }
+
+    wp_send_json_success( [
+        'reply'           => $reply,
+        'collected_email' => $collected_email,
+    ] );
+}
+
+// ================================================================
+// AJAX — SAVE CHAT LEAD (triggered when visitor provides email)
+// ================================================================
+add_action( 'wp_ajax_ideabot_save_chat_lead',        'ideabot_save_chat_lead' );
+add_action( 'wp_ajax_nopriv_ideabot_save_chat_lead', 'ideabot_save_chat_lead' );
+
+function ideabot_save_chat_lead() {
+    check_ajax_referer( 'ideabot_nonce', 'nonce' );
+
+    $email      = sanitize_email( wp_unslash( $_POST['email']      ?? '' ) );
+    $transcript = sanitize_textarea_field( wp_unslash( $_POST['transcript'] ?? '' ) );
+
+    if ( ! is_email( $email ) ) {
+        wp_send_json_error( [ 'message' => 'Invalid email.' ] );
+    }
+
+    global $wpdb;
+    $data = [
+        'first_name'        => '',
+        'email'             => $email,
+        'industry'          => '',
+        'revenue_range'     => '',
+        'biggest_challenge' => '',
+        'ai_experience'     => '',
+        'team_size'         => '',
+        'timeline'          => '',
+        'win_definition'    => $transcript,  // full conversation transcript
+        'phone'             => '',
+        'ip_address'        => sanitize_text_field( $_SERVER['REMOTE_ADDR'] ?? '' ),
+    ];
+
+    $wpdb->insert( $wpdb->prefix . 'ideaboss_leads', $data );
+    $lead_id = $wpdb->insert_id;
+
+    // Send emails — pass transcript so team notification has context
+    ideabot_notify_team( $data );
+    ideabot_send_followup( $data );
+    ideabot_fire_webhook( $data );
+
+    wp_send_json_success( [ 'lead_id' => $lead_id ] );
 }
 
 // ================================================================
@@ -316,7 +531,9 @@ function ideabot_enqueue() {
             'bubblePos' => ideabot_get( 'bubble_pos', 'right' ),
         ],
         'messages' => [
-            'welcome'        => ideabot_get( 'welcome',       $defaults['welcome'] ),
+            'welcome'          => ideabot_get( 'chat_welcome',      $defaults['chat_welcome'] ),
+            'inputPlaceholder' => ideabot_get( 'input_placeholder', $defaults['input_placeholder'] ),
+            'welcome_legacy'   => ideabot_get( 'welcome',       $defaults['welcome'] ),
             'success1'       => ideabot_get( 'success1',      $defaults['success1'] ),
             'success2'       => ideabot_get( 'success2',      $defaults['success2'] ),
             'successCta'     => ideabot_get( 'success_cta',   $defaults['success_cta'] ),
@@ -1118,8 +1335,12 @@ function ideabot_settings_page() {
             'open_delay'       => 'int',
             'excluded_ids'     => 'text',
             'z_index'          => 'int',
-            'webhook_url'      => 'url',
-            'webhook_secret'   => 'text',
+            'webhook_url'        => 'url',
+            'webhook_secret'     => 'text',
+            // AI
+            'anthropic_api_key'  => 'text',
+            'ai_model'           => 'text',
+            'input_placeholder'  => 'text',
         ];
 
         foreach ( $text_fields as $field => $type ) {
@@ -1143,6 +1364,8 @@ function ideabot_settings_page() {
             'q_ai_exp', 'q_ai_exp_opts', 'q_team', 'q_team_opts',
             'q_timeline', 'q_timeline_opts', 'q_win', 'q_win_ph',
             'q_email', 'q_phone',
+            // AI
+            'chat_welcome', 'system_prompt',
         ];
 
         foreach ( $html_textareas as $ta ) {
@@ -1208,6 +1431,7 @@ function ideabot_settings_page() {
                 <button type="button" class="ib-tab" data-panel="emails">✉️ Emails</button>
                 <button type="button" class="ib-tab" data-panel="display">👁 Display</button>
                 <button type="button" class="ib-tab" data-panel="integrations">🔗 Integrations</button>
+                <button type="button" class="ib-tab" data-panel="ai">🤖 AI</button>
             </div>
 
             <!-- ======================== GENERAL ======================== -->
@@ -1487,6 +1711,49 @@ function ideabot_settings_page() {
                         <strong>Payload fields (JSON):</strong> <code>first_name, industry, revenue_range, biggest_challenge, ai_experience, team_size, timeline, win_definition, email, phone, source, site</code><br><br>
                         Works with <strong>Zapier</strong>, <strong>Make</strong>, <strong>GoHighLevel</strong>, <strong>n8n</strong>, or any webhook-compatible service.
                     </div>
+                </div>
+            </div></div>
+
+            <!-- ======================== AI ======================== -->
+            <div class="ib-panel" id="panel-ai"><div class="ib-box">
+                <div class="ib-section"><h3>🔑 API Connection</h3>
+                    <div class="ib-note">
+                        ideaBot uses the <strong>Anthropic Claude API</strong> to power conversations. Get your API key at
+                        <a href="https://console.anthropic.com" target="_blank" style="color:#00C2FF;">console.anthropic.com</a>.
+                        Recommended model: <strong>Claude Haiku</strong> (fast + affordable) or <strong>Claude Sonnet</strong> (smarter, higher cost).
+                    </div>
+                    <div class="ib-row" style="margin-top:14px;">
+                        <div class="ib-label">Anthropic API Key</div>
+                        <div><input type="password" name="anthropic_api_key" value="<?php echo ideabot_field_val('anthropic_api_key'); ?>" placeholder="sk-ant-api03-…" autocomplete="new-password">
+                        <div class="ib-desc">Stored securely in your WordPress database. Never exposed to visitors.</div></div>
+                    </div>
+                    <div class="ib-row">
+                        <div class="ib-label">AI Model</div>
+                        <div>
+                            <select name="ai_model" style="max-width:320px;">
+                                <option value="claude-haiku-4-5-20251001" <?php selected( ideabot_get('ai_model','claude-haiku-4-5-20251001'), 'claude-haiku-4-5-20251001' ); ?>>Claude Haiku — Fast &amp; affordable (recommended)</option>
+                                <option value="claude-sonnet-4-5" <?php selected( ideabot_get('ai_model',''), 'claude-sonnet-4-5' ); ?>>Claude Sonnet — Smarter, higher cost</option>
+                                <option value="claude-opus-4-5" <?php selected( ideabot_get('ai_model',''), 'claude-opus-4-5' ); ?>>Claude Opus — Most capable, highest cost</option>
+                            </select>
+                        </div>
+                    </div>
+                </div>
+                <div class="ib-section"><h3>💬 Chat Behaviour</h3>
+                    <div class="ib-row">
+                        <div class="ib-label">Welcome Message</div>
+                        <div><textarea class="tall" name="chat_welcome"><?php echo ideabot_field_ta('chat_welcome'); ?></textarea>
+                        <div class="ib-desc">First message the bot sends when the chat opens. Supports line breaks.</div></div>
+                    </div>
+                    <div class="ib-row">
+                        <div class="ib-label">Input Placeholder</div>
+                        <div><input type="text" name="input_placeholder" value="<?php echo ideabot_field_val('input_placeholder'); ?>">
+                        <div class="ib-desc">Hint text shown in the text input field.</div></div>
+                    </div>
+                </div>
+                <div class="ib-section"><h3>🧠 Knowledge Base &amp; System Prompt</h3>
+                    <div class="ib-desc" style="margin-bottom:12px;">This is what the AI knows about ideaBoss. It is pre-loaded with your full knowledge base — edit to add pricing, case studies, FAQs, or anything specific. Leave blank to use the default.</div>
+                    <textarea name="system_prompt" style="width:100%;min-height:340px;font-size:12px;font-family:monospace;padding:10px;border:1px solid #ccc;border-radius:5px;resize:vertical;box-sizing:border-box;"><?php echo esc_textarea( ideabot_get('system_prompt','') ?: ideabot_default_system_prompt() ); ?></textarea>
+                    <div class="ib-desc" style="margin-top:6px;">The AI always follows these instructions. Include your services, pricing, FAQs, brand voice, and any rules for how it should respond.</div>
                 </div>
             </div></div>
 
