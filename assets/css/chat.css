@@ -153,6 +153,16 @@
     border-bottom-right-radius: 4px;
 }
 
+/* ── Timestamp ──────────────────────────────────────────────── */
+.ib-msg-time {
+    font-size: 10px;
+    color: #aaa;
+    margin-top: 3px;
+    padding: 0 4px;
+}
+.ib-msg-user .ib-msg-time { text-align: right; }
+.ib-msg-bot  .ib-msg-time { text-align: left;  }
+
 /* ── Typing indicator ────────────────────────────────────────── */
 .ib-typing-bubble {
     display: flex;

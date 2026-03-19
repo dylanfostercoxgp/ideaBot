@@ -3,7 +3,7 @@
  * Plugin Name: ideaBot
  * Plugin URI:  https://ideaboss.io
  * Description: ideaBot by ideaBoss — a conversational lead qualification chat widget. Walks visitors through a guided discovery conversation, captures qualified leads, and sends personalized follow-up emails automatically.
- * Version:     1.1.1
+ * Version:     1.1.2
  * Author:      ideaBoss / Cox Group
  * Author URI:  https://ideaboss.io
  * License:     GPL v2 or later
@@ -12,8 +12,8 @@
 
 if ( ! defined( 'ABSPATH' ) ) exit;
 
-define( 'IDEABOT_VERSION',     '1.1.1' );
-define( 'IDEABOT_DB_VER',      '1.0.1' );
+define( 'IDEABOT_VERSION',     '1.1.2' );
+define( 'IDEABOT_DB_VER',      '1.0.2' );
 define( 'IDEABOT_DIR',         plugin_dir_path( __FILE__ ) );
 define( 'IDEABOT_URL',         plugin_dir_url( __FILE__ ) );
 define( 'IDEABOT_GITHUB_REPO', 'dylanfostercoxgp/ideaBot' );
@@ -214,21 +214,47 @@ function ideabot_defaults() {
         'hide_mobile'           => '0',
         'excluded_ids'          => '',
         'z_index'               => '999999',
-        // Integrations
+        'show_timestamps'       => '0',
+        'chat_height'           => '480',
+        'disable_typing_anim'   => '0',
+        // Business Hours
+        'hours_enabled'         => '0',
+        'hours_start'           => '09:00',
+        'hours_end'             => '17:00',
+        'hours_timezone'        => 'America/New_York',
+        'hours_days'            => '1,2,3,4,5',   // Mon-Fri
+        'offline_message'       => "Hey! 👋 We're offline right now but drop your email and we'll follow up first thing.",
+        // Integrations — Webhook
         'webhook_enabled'       => '0',
         'webhook_url'           => '',
         'webhook_secret'        => '',
+        // Integrations — Slack
+        'slack_enabled'         => '0',
+        'slack_webhook_url'     => '',
+        'slack_min_score'       => '0',   // only notify if lead_score >= this
+        // Integrations — Analytics
+        'ga4_id'                => '',
+        'meta_pixel_id'         => '',
+        // Integrations — GoHighLevel
+        'ghl_enabled'           => '0',
+        'ghl_api_key'           => '',
+        'ghl_location_id'       => '',
         // Auto-Deploy
         'deploy_enabled'        => '0',
         'deploy_github_token'   => '',
         'deploy_github_repo'    => 'dylanfostercoxgp/ideaBot',
-        'deploy_secret'         => '',   // HMAC secret — auto-generated on first use
+        'deploy_secret'         => '',
         // AI / Chat
         'anthropic_api_key'     => '',
         'ai_model'              => 'claude-haiku-4-5-20251001',
-        'system_prompt'         => '',   // empty = use ideabot_default_system_prompt()
+        'system_prompt'         => '',
         'chat_welcome'          => "Hey! 👋 I'm ideaBot — the AI assistant for ideaBoss.\n\nAsk me anything about what we do, how AI could help your business, or how we work. What's on your mind?",
         'input_placeholder'     => 'Ask me anything…',
+        'min_exchanges'         => '3',   // exchanges before asking for email
+        'max_response_tokens'   => '1024',
+        'send_transcript'       => '0',   // email transcript to visitor
+        'transcript_subject'    => 'Your conversation with ideaBot',
+        'bcc_email'             => '',
     ];
 }
 
@@ -308,18 +334,88 @@ Direct, not harsh. Outcome-first. Practical optimism. Earned edge. Operator, not
 **Is there a demo or free trial?** — Best path is to visit ideaboss.io and connect with the team directly. They will assess fit and walk through what we would build.
 
 ## EMAIL COLLECTION
-After the visitor has sent 3 or more messages, naturally ask for their email so the ideaBoss team can follow up. Weave it into the conversation organically. Examples:
-- "By the way, what is the best email to send you some ideas on this?"
-- "Want me to have someone from the team reach out? What is your email?"
-- "I would love to get you some more detailed information — what email works best for you?"
+After the visitor has sent 3 or more messages, naturally ask for their name AND email in a single message so the ideaBoss team can follow up with something personalized. Examples:
+- "By the way, what is your name and the best email to send you some ideas on this?"
+- "Want me to have someone from the team reach out? What is your name and email?"
+- "I would love to get you more detailed information — what is your name and what email works best?"
+- "Before I forget — what name should I use, and where can we reach you?"
 
-Only ask once. If they decline or change the subject, respect it and continue helping.
+Ask for both name and email in one natural ask. Only ask once. If they decline or change the subject, respect it and continue helping.
 
 ## LIMITATIONS
 - You cannot book appointments — direct to ideaboss.io
 - You cannot access account or billing information
 - You do not have exact pricing — offer to connect with the team at ideaboss.io
 - If asked about something outside your knowledge, say so honestly and offer to connect them with the team';
+}
+
+// ================================================================
+// AI FIELD EXTRACTION — Parse lead data from conversation transcript
+// Calls Claude to extract structured fields so nothing is left blank.
+// ================================================================
+function ideabot_extract_lead_data( $transcript ) {
+    $api_key = ideabot_get( 'anthropic_api_key', '' );
+    $model   = ideabot_get( 'ai_model', 'claude-haiku-4-5-20251001' );
+    if ( empty( $api_key ) || empty( $transcript ) ) return [];
+
+    $prompt = 'You are a data extraction assistant. Read the following chat conversation between an ideaBot assistant and a website visitor. Extract all available information and return ONLY a valid JSON object with these exact keys (use empty string "" if a field is not found or not mentioned):
+
+{
+  "first_name": "visitor first name",
+  "last_name": "visitor last name",
+  "company_name": "business or company name",
+  "industry": "industry or sector",
+  "revenue_range": "annual revenue range mentioned",
+  "budget_range": "budget or investment range mentioned",
+  "biggest_challenge": "main pain point or challenge in 1-2 sentences",
+  "current_tools": "tools, software, or platforms they currently use",
+  "ai_experience": "their AI experience level",
+  "team_size": "team or company size",
+  "timeline": "urgency or timeline for making a change",
+  "win_definition": "their 90-day goal or desired outcome",
+  "website": "website URL if mentioned",
+  "phone": "phone number if mentioned",
+  "lead_score": 0
+}
+
+For lead_score, assign an integer 1–10 based on:
+- Timeline urgency (ASAP = +3, 1-3 months = +2, exploring = +1)
+- Revenue/company size signals (larger = higher)
+- Clear specific challenge = +2
+- Mentions budget = +2
+- Engaged multiple exchanges = +1
+
+Return ONLY the JSON object. No markdown, no explanation, no code blocks.
+
+CONVERSATION TRANSCRIPT:
+' . $transcript;
+
+    $response = wp_remote_post( 'https://api.anthropic.com/v1/messages', [
+        'timeout' => 30,
+        'headers' => [
+            'Content-Type'      => 'application/json',
+            'x-api-key'         => $api_key,
+            'anthropic-version' => '2023-06-01',
+        ],
+        'body' => wp_json_encode( [
+            'model'      => $model,
+            'max_tokens' => 600,
+            'messages'   => [ [ 'role' => 'user', 'content' => $prompt ] ],
+        ] ),
+    ] );
+
+    if ( is_wp_error( $response ) ) return [];
+    if ( 200 !== wp_remote_retrieve_response_code( $response ) ) return [];
+
+    $body = json_decode( wp_remote_retrieve_body( $response ), true );
+    $text = isset( $body['content'][0]['text'] ) ? trim( $body['content'][0]['text'] ) : '';
+
+    // Strip any accidental markdown code fences
+    $text = preg_replace( '/^```(?:json)?\s*/i', '', $text );
+    $text = preg_replace( '/\s*```$/',           '', $text );
+
+    $extracted = json_decode( $text, true );
+    return is_array( $extracted ) ? $extracted : [];
 }
 
 // ================================================================
@@ -369,7 +465,7 @@ function ideabot_chat() {
         ],
         'body' => wp_json_encode( [
             'model'      => $model,
-            'max_tokens' => 1024,
+            'max_tokens' => (int) ideabot_get( 'max_response_tokens', '1024' ),
             'system'     => $system,
             'messages'   => $messages,
         ] ),
@@ -401,6 +497,7 @@ function ideabot_chat() {
     wp_send_json_success( [
         'reply'           => $reply,
         'collected_email' => $collected_email,
+        'min_exchanges'   => (int) ideabot_get( 'min_exchanges', '3' ),
     ] );
 }
 
@@ -415,35 +512,57 @@ function ideabot_save_chat_lead() {
 
     $email      = sanitize_email( wp_unslash( $_POST['email']      ?? '' ) );
     $transcript = sanitize_textarea_field( wp_unslash( $_POST['transcript'] ?? '' ) );
+    $source_pg  = sanitize_text_field( wp_unslash( $_POST['source_page'] ?? '' ) );
 
     if ( ! is_email( $email ) ) {
         wp_send_json_error( [ 'message' => 'Invalid email.' ] );
     }
 
+    // Run AI extraction to pull structured fields from the conversation
+    $extracted = ideabot_extract_lead_data( $transcript );
+
+    // Merge extracted fields with safe fallbacks
+    $phone   = sanitize_text_field( $extracted['phone']        ?? '' );
+    $website = esc_url_raw(          $extracted['website']      ?? '' );
+    $score   = max( 0, min( 10, (int) ( $extracted['lead_score'] ?? 0 ) ) );
+
     global $wpdb;
     $data = [
-        'first_name'        => '',
-        'email'             => $email,
-        'industry'          => '',
-        'revenue_range'     => '',
-        'biggest_challenge' => '',
-        'ai_experience'     => '',
-        'team_size'         => '',
-        'timeline'          => '',
-        'win_definition'    => $transcript,  // full conversation transcript
-        'phone'             => '',
-        'ip_address'        => sanitize_text_field( $_SERVER['REMOTE_ADDR'] ?? '' ),
+        'first_name'              => sanitize_text_field( $extracted['first_name']       ?? '' ),
+        'last_name'               => sanitize_text_field( $extracted['last_name']        ?? '' ),
+        'company_name'            => sanitize_text_field( $extracted['company_name']     ?? '' ),
+        'email'                   => $email,
+        'phone'                   => $phone,
+        'website'                 => $website,
+        'industry'                => sanitize_text_field( $extracted['industry']         ?? '' ),
+        'revenue_range'           => sanitize_text_field( $extracted['revenue_range']    ?? '' ),
+        'budget_range'            => sanitize_text_field( $extracted['budget_range']     ?? '' ),
+        'biggest_challenge'       => sanitize_text_field( $extracted['biggest_challenge']?? '' ),
+        'current_tools'           => sanitize_textarea_field( $extracted['current_tools']?? '' ),
+        'ai_experience'           => sanitize_text_field( $extracted['ai_experience']    ?? '' ),
+        'team_size'               => sanitize_text_field( $extracted['team_size']        ?? '' ),
+        'timeline'                => sanitize_text_field( $extracted['timeline']         ?? '' ),
+        'win_definition'          => sanitize_textarea_field( $extracted['win_definition']?? '' ),
+        'conversation_transcript' => $transcript,
+        'lead_score'              => $score,
+        'source_page'             => $source_pg,
+        'ip_address'              => sanitize_text_field( $_SERVER['REMOTE_ADDR'] ?? '' ),
     ];
 
     $wpdb->insert( $wpdb->prefix . 'ideaboss_leads', $data );
     $lead_id = $wpdb->insert_id;
 
-    // Send emails — pass transcript so team notification has context
+    // Fire notifications (pass transcript for team context)
+    $data['win_definition_display'] = $data['win_definition'] ?: $transcript;
     ideabot_notify_team( $data );
     ideabot_send_followup( $data );
     ideabot_fire_webhook( $data );
+    ideabot_fire_slack( $data );
+    ideabot_send_transcript( $email, $transcript, $data['first_name'] );
+    ideabot_sync_ghl( $data );
+    ideabot_output_analytics_event( 'lead_captured', $lead_id );
 
-    wp_send_json_success( [ 'lead_id' => $lead_id ] );
+    wp_send_json_success( [ 'lead_id' => $lead_id, 'first_name' => $data['first_name'] ] );
 }
 
 // ================================================================
@@ -463,19 +582,28 @@ function ideabot_run_db_upgrade() {
     $table   = $wpdb->prefix . 'ideaboss_leads';
     $charset = $wpdb->get_charset_collate();
     $sql     = "CREATE TABLE IF NOT EXISTS {$table} (
-        id                BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-        first_name        VARCHAR(100)  DEFAULT '',
-        industry          VARCHAR(200)  DEFAULT '',
-        revenue_range     VARCHAR(100)  DEFAULT '',
-        biggest_challenge VARCHAR(300)  DEFAULT '',
-        ai_experience     VARCHAR(100)  DEFAULT '',
-        team_size         VARCHAR(100)  DEFAULT '',
-        timeline          VARCHAR(100)  DEFAULT '',
-        win_definition    TEXT,
-        email             VARCHAR(200)  DEFAULT '',
-        phone             VARCHAR(50)   DEFAULT '',
-        ip_address        VARCHAR(50)   DEFAULT '',
-        created_at        DATETIME      DEFAULT CURRENT_TIMESTAMP
+        id                      BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+        first_name              VARCHAR(100)  DEFAULT '',
+        last_name               VARCHAR(100)  DEFAULT '',
+        company_name            VARCHAR(200)  DEFAULT '',
+        email                   VARCHAR(200)  DEFAULT '',
+        phone                   VARCHAR(50)   DEFAULT '',
+        website                 VARCHAR(300)  DEFAULT '',
+        industry                VARCHAR(200)  DEFAULT '',
+        revenue_range           VARCHAR(100)  DEFAULT '',
+        budget_range            VARCHAR(100)  DEFAULT '',
+        biggest_challenge       VARCHAR(300)  DEFAULT '',
+        current_tools           TEXT,
+        ai_experience           VARCHAR(100)  DEFAULT '',
+        team_size               VARCHAR(100)  DEFAULT '',
+        timeline                VARCHAR(100)  DEFAULT '',
+        win_definition          TEXT,
+        conversation_transcript LONGTEXT,
+        lead_score              TINYINT UNSIGNED DEFAULT 0,
+        source_page             VARCHAR(500)  DEFAULT '',
+        notes                   TEXT,
+        ip_address              VARCHAR(50)   DEFAULT '',
+        created_at              DATETIME      DEFAULT CURRENT_TIMESTAMP
     ) {$charset};";
     require_once ABSPATH . 'wp-admin/includes/upgrade.php';
     dbDelta( $sql );
@@ -530,10 +658,21 @@ function ideabot_enqueue() {
         'nonce'       => wp_create_nonce( 'ideabot_nonce' ),
         'accentColor' => ideabot_get( 'accent_color',  $defaults['accent_color'] ),
         'zIndex'      => ideabot_get( 'z_index',       $defaults['z_index'] ),
+        'ga4Id'       => ideabot_get( 'ga4_id',        '' ),
+        'pixelId'     => ideabot_get( 'meta_pixel_id', '' ),
         'display'     => [
-            'openDelay' => ideabot_get( 'open_delay', '0' ),
-            'autoOpen'  => ideabot_get( 'auto_open',  '0' ),
-            'bubblePos' => ideabot_get( 'bubble_pos', 'right' ),
+            'openDelay'          => ideabot_get( 'open_delay',          '0' ),
+            'autoOpen'           => ideabot_get( 'auto_open',           '0' ),
+            'bubblePos'          => ideabot_get( 'bubble_pos',          'right' ),
+            'showTimestamps'     => ideabot_get( 'show_timestamps',     '0' ),
+            'chatHeight'         => ideabot_get( 'chat_height',         '480' ),
+            'disableTypingAnim'  => ideabot_get( 'disable_typing_anim','0' ),
+            'hoursEnabled'       => ideabot_get( 'hours_enabled',       '0' ),
+            'hoursStart'         => ideabot_get( 'hours_start',         '09:00' ),
+            'hoursEnd'           => ideabot_get( 'hours_end',           '17:00' ),
+            'hoursDays'          => ideabot_get( 'hours_days',          '1,2,3,4,5' ),
+            'hoursTimezone'      => ideabot_get( 'hours_timezone',      'America/New_York' ),
+            'offlineMessage'     => ideabot_get( 'offline_message',     $defaults['offline_message'] ),
         ],
         'messages' => [
             'welcome'          => ideabot_get( 'chat_welcome',      $defaults['chat_welcome'] ),
@@ -786,17 +925,26 @@ function ideabot_notify_team( $data ) {
     $subject  = ideabot_get( 'notify_subject', $defaults['notify_subject'] );
     $subject  = str_replace( [ '{first_name}', '{industry}' ], [ $data['first_name'], $data['industry'] ], $subject );
 
+    $full_name = trim( ( $data['first_name'] ?? '' ) . ' ' . ( $data['last_name'] ?? '' ) ) ?: '—';
+    $score_val = isset( $data['lead_score'] ) && $data['lead_score'] > 0
+        ? str_repeat( '●', (int)$data['lead_score'] ) . str_repeat( '○', 10 - (int)$data['lead_score'] ) . ' ' . $data['lead_score'] . '/10'
+        : '—';
     $fields = [
-        [ '👤 Name',              esc_html( $data['first_name'] ) ],
+        [ '👤 Name',              esc_html( $full_name ) ],
+        [ '🏢 Company',           esc_html( $data['company_name'] ?? '—' ) ?: '—' ],
         [ '✉️ Email',             '<a href="mailto:' . esc_attr( $data['email'] ) . '" style="color:' . esc_attr($accent) . ';font-weight:600;">' . esc_html( $data['email'] ) . '</a>' ],
         [ '📞 Phone',             esc_html( $data['phone'] ?: '—' ) ],
-        [ '🏢 Industry',          esc_html( $data['industry'] ) ],
-        [ '💰 Revenue',           esc_html( $data['revenue_range'] ) ],
-        [ '🔥 Biggest Challenge', esc_html( $data['biggest_challenge'] ) ],
-        [ '🤖 AI Experience',     esc_html( $data['ai_experience'] ) ],
-        [ '👥 Team Size',         esc_html( $data['team_size'] ) ],
-        [ '⏱ Timeline',           esc_html( $data['timeline'] ) ],
-        [ '🎯 90-Day Win',        esc_html( $data['win_definition'] ) ],
+        [ '🌐 Website',           ( $data['website'] ?? '' ) ? '<a href="' . esc_url($data['website']) . '" style="color:' . esc_attr($accent) . ';">' . esc_html($data['website']) . '</a>' : '—' ],
+        [ '🏗 Industry',          esc_html( $data['industry'] ?: '—' ) ],
+        [ '💰 Revenue',           esc_html( $data['revenue_range'] ?: '—' ) ],
+        [ '💵 Budget',            esc_html( $data['budget_range'] ?: '—' ) ],
+        [ '🔥 Biggest Challenge', esc_html( $data['biggest_challenge'] ?: '—' ) ],
+        [ '🛠 Current Tools',     esc_html( $data['current_tools'] ?: '—' ) ],
+        [ '🤖 AI Experience',     esc_html( $data['ai_experience'] ?: '—' ) ],
+        [ '👥 Team Size',         esc_html( $data['team_size'] ?: '—' ) ],
+        [ '⏱ Timeline',           esc_html( $data['timeline'] ?: '—' ) ],
+        [ '🎯 90-Day Win',        esc_html( $data['win_definition'] ?: '—' ) ],
+        [ '⭐ Lead Score',        '<span style="font-family:monospace;">' . esc_html( $score_val ) . '</span>' ],
     ];
 
     $rows_html = '';
@@ -871,6 +1019,8 @@ function ideabot_notify_team( $data ) {
     $headers = [ 'Content-Type: text/html; charset=UTF-8' ];
     if ( $cc_raw )   $headers[] = 'Cc: ' . $cc_raw;
     if ( $reply_to ) $headers[] = 'Reply-To: ' . $reply_to;
+    $bcc = ideabot_get( 'bcc_email', '' );
+    if ( $bcc )      $headers[] = 'Bcc: ' . $bcc;
 
     wp_mail( $to, $subject, $body, $headers );
 }
@@ -1179,6 +1329,136 @@ function ideabot_deploy_webhook( WP_REST_Request $request ) {
 }
 
 // ================================================================
+// SLACK NOTIFICATION
+// ================================================================
+function ideabot_fire_slack( $data ) {
+    if ( ideabot_get( 'slack_enabled', '0' ) !== '1' ) return;
+    $url = ideabot_get( 'slack_webhook_url', '' );
+    if ( empty( $url ) ) return;
+
+    $min_score = (int) ideabot_get( 'slack_min_score', '0' );
+    $score     = (int) ( $data['lead_score'] ?? 0 );
+    if ( $score < $min_score ) return;
+
+    $name      = trim( ( $data['first_name'] ?? '' ) . ' ' . ( $data['last_name'] ?? '' ) ) ?: 'Unknown';
+    $company   = $data['company_name'] ?? '';
+    $industry  = $data['industry']     ?? '';
+    $challenge = $data['biggest_challenge'] ?? '';
+    $email_val = $data['email'] ?? '';
+    $score_str = $score > 0 ? " · Score: {$score}/10" : '';
+    $co_str    = $company ? " at {$company}" : '';
+
+    $text = "🎯 *New ideaBot Lead{$score_str}*\n"
+          . "*{$name}{$co_str}* · {$email_val}\n"
+          . ( $industry  ? "Industry: {$industry}\n"          : '' )
+          . ( $challenge ? "Challenge: _{$challenge}_\n"      : '' );
+
+    wp_remote_post( $url, [
+        'method'   => 'POST',
+        'headers'  => [ 'Content-Type' => 'application/json' ],
+        'body'     => wp_json_encode( [ 'text' => $text ] ),
+        'timeout'  => 10,
+        'blocking' => false,
+    ] );
+}
+
+// ================================================================
+// TRANSCRIPT EMAIL — optionally send conversation to visitor
+// ================================================================
+function ideabot_send_transcript( $email, $transcript, $first_name = '' ) {
+    if ( ideabot_get( 'send_transcript', '0' ) !== '1' ) return;
+    if ( empty( $transcript ) || ! is_email( $email ) ) return;
+
+    $subject = ideabot_get( 'transcript_subject', 'Your conversation with ideaBot' );
+    $accent  = ideabot_get( 'accent_color', '#00C2FF' );
+    $name    = $first_name ? esc_html( $first_name ) : 'there';
+
+    // Format transcript as readable HTML
+    $lines    = explode( "\n\n", $transcript );
+    $chat_html = '';
+    foreach ( $lines as $line ) {
+        $line = trim( $line );
+        if ( empty( $line ) ) continue;
+        if ( false !== strpos( $line, 'ideaBot:' ) ) {
+            $msg = esc_html( substr( $line, 8 ) );
+            $chat_html .= "<tr><td style='padding:6px 0;'><span style='font-size:11px;font-weight:700;color:{$accent};display:block;margin-bottom:2px;'>💡 ideaBot</span><div style='background:#f5f5f5;padding:10px 14px;border-radius:0 8px 8px 8px;font-size:13px;color:#333;line-height:1.5;'>{$msg}</div></td></tr>";
+        } else {
+            $msg = esc_html( ltrim( ltrim( $line, 'Visitor:' ) ) );
+            $chat_html .= "<tr><td style='padding:6px 0;text-align:right;'><span style='font-size:11px;font-weight:700;color:#999;display:block;margin-bottom:2px;text-align:right;'>You</span><div style='background:{$accent};color:#000;padding:10px 14px;border-radius:8px 0 8px 8px;font-size:13px;line-height:1.5;display:inline-block;text-align:left;'>{$msg}</div></td></tr>";
+        }
+    }
+
+    $body = "<!DOCTYPE html><html><body style='margin:0;padding:0;background:#f0f0f0;font-family:-apple-system,BlinkMacSystemFont,Arial,sans-serif;'>
+<table width='100%' cellpadding='0' cellspacing='0' style='background:#f0f0f0;'><tr><td align='center' style='padding:28px 16px;'>
+<table width='600' cellpadding='0' cellspacing='0' style='max-width:600px;width:100%;'>
+  <tr><td style='background:#0a0a0a;padding:24px 28px;border-radius:10px 10px 0 0;text-align:center;'>
+    <p style='margin:0;font-size:22px;font-weight:800;color:{$accent};'>💡 ideaBot</p>
+    <p style='margin:4px 0 0;font-size:12px;color:#555;'>Your conversation transcript</p>
+  </td></tr>
+  <tr><td style='background:#fff;padding:24px 28px;border-left:1px solid #e0e0e0;border-right:1px solid #e0e0e0;'>
+    <p style='margin:0 0 16px;font-size:14px;color:#555;'>Hey {$name}, here's a copy of your chat with ideaBot — for your reference.</p>
+    <table width='100%' cellpadding='0' cellspacing='0'>{$chat_html}</table>
+    <hr style='border:none;border-top:1px solid #eee;margin:20px 0;'>
+    <p style='margin:0;font-size:13px;color:#999;'>Ready to take the next step? Visit <a href='https://ideaboss.io' style='color:{$accent};'>ideaboss.io</a></p>
+  </td></tr>
+  <tr><td style='background:#0a0a0a;padding:14px 28px;text-align:center;border-radius:0 0 10px 10px;'>
+    <p style='margin:0;font-size:11px;color:#555;'>ideaBoss® · <a href='https://ideaboss.io' style='color:{$accent};text-decoration:none;'>ideaboss.io</a></p>
+  </td></tr>
+</table></td></tr></table></body></html>";
+
+    $headers = [ 'Content-Type: text/html; charset=UTF-8' ];
+    $reply   = ideabot_get( 'reply_to', '' );
+    if ( $reply ) $headers[] = 'Reply-To: ' . $reply;
+
+    wp_mail( $email, $subject, $body, $headers );
+}
+
+// ================================================================
+// GoHighLevel CRM SYNC
+// ================================================================
+function ideabot_sync_ghl( $data ) {
+    if ( ideabot_get( 'ghl_enabled', '0' ) !== '1' ) return;
+    $api_key     = ideabot_get( 'ghl_api_key',     '' );
+    $location_id = ideabot_get( 'ghl_location_id', '' );
+    if ( empty( $api_key ) || empty( $location_id ) ) return;
+
+    $payload = [
+        'firstName'   => $data['first_name']    ?? '',
+        'lastName'    => $data['last_name']      ?? '',
+        'email'       => $data['email']          ?? '',
+        'phone'       => $data['phone']          ?? '',
+        'website'     => $data['website']        ?? '',
+        'companyName' => $data['company_name']   ?? '',
+        'locationId'  => $location_id,
+        'tags'        => [ 'ideabot-lead' ],
+        'customField' => [
+            [ 'id' => 'industry',          'value' => $data['industry']          ?? '' ],
+            [ 'id' => 'biggest_challenge', 'value' => $data['biggest_challenge'] ?? '' ],
+            [ 'id' => 'lead_score',        'value' => (string) ( $data['lead_score'] ?? 0 ) ],
+        ],
+    ];
+    wp_remote_post( 'https://rest.gohighlevel.com/v1/contacts/', [
+        'method'   => 'POST',
+        'headers'  => [
+            'Authorization' => 'Bearer ' . $api_key,
+            'Content-Type'  => 'application/json',
+        ],
+        'body'     => wp_json_encode( $payload ),
+        'timeout'  => 15,
+        'blocking' => false,
+    ] );
+}
+
+// ================================================================
+// ANALYTICS EVENT (GA4 via Measurement Protocol)
+// Fires server-side event — also echoed to frontend via wp_footer
+// ================================================================
+function ideabot_output_analytics_event( $event, $value = '' ) {
+    // Front-end events are fired in chat.js using gtag() if GA4 ID is set.
+    // This function is a placeholder for any server-side needs.
+}
+
+// ================================================================
 // ADMIN MENU
 // ================================================================
 add_action( 'admin_menu', 'ideabot_admin_menu' );
@@ -1250,13 +1530,13 @@ function ideabot_leads_page() {
             <thead>
                 <tr>
                     <th style="width:80px;">Date</th>
-                    <th style="width:90px;">Name</th>
-                    <th style="width:165px;">Email</th>
-                    <th style="width:100px;">Industry</th>
-                    <th style="width:90px;">Revenue</th>
-                    <th style="width:80px;">Team</th>
+                    <th style="width:44px;">Score</th>
+                    <th style="width:100px;">Name</th>
+                    <th style="width:120px;">Company</th>
+                    <th style="width:150px;">Email</th>
+                    <th style="width:90px;">Industry</th>
+                    <th style="width:80px;">Timeline</th>
                     <th>Challenge</th>
-                    <th style="width:105px;">Timeline</th>
                     <th style="width:200px;">Actions</th>
                 </tr>
             </thead>
@@ -1265,29 +1545,48 @@ function ideabot_leads_page() {
                 <tr><td colspan="9" style="text-align:center;padding:40px;color:#999;">No leads yet — ideaBot is live and ready. 🎯</td></tr>
                 <?php else : foreach ( $leads as $l ) :
                     $lead_json = esc_attr( wp_json_encode( [
-                        'id'                => (int)   $l->id,
-                        'first_name'        => (string) $l->first_name,
-                        'email'             => (string) $l->email,
-                        'phone'             => (string) $l->phone,
-                        'industry'          => (string) $l->industry,
-                        'revenue_range'     => (string) $l->revenue_range,
-                        'biggest_challenge' => (string) $l->biggest_challenge,
-                        'ai_experience'     => (string) $l->ai_experience,
-                        'team_size'         => (string) $l->team_size,
-                        'timeline'          => (string) $l->timeline,
-                        'win_definition'    => (string) $l->win_definition,
-                        'created_at'        => (string) $l->created_at,
+                        'id'                      => (int)    $l->id,
+                        'first_name'              => (string) $l->first_name,
+                        'last_name'               => (string) ( $l->last_name ?? '' ),
+                        'company_name'            => (string) ( $l->company_name ?? '' ),
+                        'email'                   => (string) $l->email,
+                        'phone'                   => (string) $l->phone,
+                        'website'                 => (string) ( $l->website ?? '' ),
+                        'industry'                => (string) $l->industry,
+                        'revenue_range'           => (string) $l->revenue_range,
+                        'budget_range'            => (string) ( $l->budget_range ?? '' ),
+                        'biggest_challenge'       => (string) $l->biggest_challenge,
+                        'current_tools'           => (string) ( $l->current_tools ?? '' ),
+                        'ai_experience'           => (string) $l->ai_experience,
+                        'team_size'               => (string) $l->team_size,
+                        'timeline'                => (string) $l->timeline,
+                        'win_definition'          => (string) $l->win_definition,
+                        'lead_score'              => (int)    ( $l->lead_score ?? 0 ),
+                        'source_page'             => (string) ( $l->source_page ?? '' ),
+                        'conversation_transcript' => (string) ( $l->conversation_transcript ?? '' ),
+                        'created_at'              => (string) $l->created_at,
                     ] ) );
+                    ?>
+                    <?php
+                    $score     = isset( $l->lead_score ) ? (int) $l->lead_score : 0;
+                    $score_bg  = $score >= 7 ? '#e8f5e9' : ( $score >= 4 ? '#fff8e1' : '#f5f5f5' );
+                    $score_col = $score >= 7 ? '#2e7d32' : ( $score >= 4 ? '#f57f17' : '#888' );
                     ?>
                     <tr id="ib-row-<?php echo (int)$l->id; ?>">
                         <td><?php echo esc_html( date( 'M j, Y', strtotime( $l->created_at ) ) ); ?></td>
-                        <td><strong><?php echo esc_html( $l->first_name ); ?></strong></td>
+                        <td style="text-align:center;">
+                            <?php if ( $score > 0 ) : ?>
+                            <span style="background:<?php echo $score_bg; ?>;color:<?php echo $score_col; ?>;font-weight:700;font-size:12px;padding:2px 6px;border-radius:10px;"><?php echo $score; ?></span>
+                            <?php else : ?>
+                            <span style="color:#ccc;">—</span>
+                            <?php endif; ?>
+                        </td>
+                        <td><strong><?php echo esc_html( trim( $l->first_name . ' ' . ( $l->last_name ?? '' ) ) ?: '—' ); ?></strong></td>
+                        <td><?php echo esc_html( $l->company_name ?? '—' ); ?></td>
                         <td style="word-break:break-all;"><a href="mailto:<?php echo esc_attr( $l->email ); ?>"><?php echo esc_html( $l->email ); ?></a></td>
-                        <td><?php echo esc_html( $l->industry ); ?></td>
-                        <td><?php echo esc_html( $l->revenue_range ); ?></td>
-                        <td><?php echo esc_html( $l->team_size ?: '—' ); ?></td>
-                        <td><?php echo esc_html( $l->biggest_challenge ); ?></td>
-                        <td><?php echo esc_html( $l->timeline ); ?></td>
+                        <td><?php echo esc_html( $l->industry ?: '—' ); ?></td>
+                        <td><?php echo esc_html( $l->timeline ?: '—' ); ?></td>
+                        <td><?php echo esc_html( $l->biggest_challenge ?: '—' ); ?></td>
                         <td>
                             <div class="ib-actions">
                                 <button class="ib-action-btn view"   data-lead="<?php echo $lead_json; ?>">👁 View</button>
@@ -1334,29 +1633,54 @@ function ideabot_leads_page() {
                 setTimeout(function(){ t.style.display='none'; }, 3500);
             }
 
+            function scoreBar(n) {
+                if (!n) return '—';
+                var filled = '', empty = '';
+                for (var i=0;i<n;i++) filled += '●';
+                for (var j=n;j<10;j++) empty += '○';
+                var col = n>=7?'#2e7d32':n>=4?'#f57f17':'#888';
+                return '<span style="font-family:monospace;font-size:13px;color:'+col+';">'+filled+'<span style="color:#ccc;">'+empty+'</span></span> <strong style="color:'+col+';">'+n+'/10</strong>';
+            }
+
             function openModal(lead) {
                 activeLeadId = lead.id;
-                document.getElementById('ib-modal-title').textContent = '💡 ' + lead.first_name + ' — ' + lead.email;
+                var fullName = (lead.first_name + ' ' + (lead.last_name||'')).trim() || '—';
+                document.getElementById('ib-modal-title').textContent = '💡 ' + fullName + ' — ' + lead.email;
                 var fields = [
                     ['Date',               lead.created_at],
-                    ['Name',               lead.first_name],
+                    ['⭐ Lead Score',       '__SCORE__'],
+                    ['Name',               fullName],
+                    ['Company',            lead.company_name],
                     ['Email',              lead.email],
                     ['Phone',              lead.phone],
+                    ['Website',            lead.website],
                     ['Industry',           lead.industry],
                     ['Revenue Range',      lead.revenue_range],
+                    ['Budget Range',       lead.budget_range],
                     ['Biggest Challenge',  lead.biggest_challenge],
+                    ['Current Tools',      lead.current_tools],
                     ['AI Experience',      lead.ai_experience],
                     ['Team Size',          lead.team_size],
                     ['Timeline',           lead.timeline],
                     ['90-Day Win',         lead.win_definition],
+                    ['Source Page',        lead.source_page],
                 ];
                 var html = '';
                 fields.forEach(function(f){
+                    var val = (f[1] === '__SCORE__') ? scoreBar(lead.lead_score) : escHtml(f[1] || '');
                     html += '<div class="ib-modal-field">'
                          + '<div class="ib-modal-label">' + f[0] + '</div>'
-                         + '<div class="ib-modal-value">' + escHtml(f[1] || '') + '</div>'
+                         + '<div class="ib-modal-value">' + val + '</div>'
                          + '</div>';
                 });
+                // Conversation transcript (collapsible)
+                if (lead.conversation_transcript) {
+                    html += '<div class="ib-modal-field" style="grid-template-columns:1fr;gap:6px;">'
+                          + '<div class="ib-modal-label" style="cursor:pointer;user-select:none;" onclick="var t=document.getElementById(\'ib-transcript\');t.style.display=t.style.display===\'none\'?\'block\':\'none\';">💬 Conversation Transcript ▾</div>'
+                          + '<div id="ib-transcript" style="display:none;background:#f5f5f5;border-radius:6px;padding:14px;font-size:12px;white-space:pre-wrap;max-height:260px;overflow-y:auto;line-height:1.6;color:#333;">'
+                          + escHtml(lead.conversation_transcript)
+                          + '</div></div>';
+                }
                 document.getElementById('ib-modal-body').innerHTML = html;
                 document.getElementById('ib-modal-overlay').classList.add('open');
             }
@@ -1441,7 +1765,9 @@ function ideabot_settings_page() {
         check_admin_referer( 'ideabot_settings' );
 
         // Checkboxes (unchecked = absent from $_POST)
-        foreach ( [ 'enabled', 'auto_open', 'hide_mobile', 'webhook_enabled', 'deploy_enabled' ] as $cb ) {
+        foreach ( [ 'enabled', 'auto_open', 'hide_mobile', 'webhook_enabled', 'deploy_enabled',
+                    'slack_enabled', 'ghl_enabled', 'hours_enabled', 'send_transcript',
+                    'show_timestamps', 'disable_typing_anim' ] as $cb ) {
             update_option( 'ideabot_' . $cb, isset( $_POST[$cb] ) ? '1' : '0' );
         }
 
@@ -1472,10 +1798,31 @@ function ideabot_settings_page() {
             'deploy_github_token' => 'text',
             'deploy_github_repo'  => 'text',
             'deploy_secret'       => 'text',
+            // Display
+            'chat_height'         => 'int',
+            'z_index'             => 'int',
+            // Business Hours
+            'hours_start'         => 'text',
+            'hours_end'           => 'text',
+            'hours_timezone'      => 'text',
+            'hours_days'          => 'text',
+            // Slack
+            'slack_webhook_url'   => 'url',
+            'slack_min_score'     => 'int',
+            // Analytics
+            'ga4_id'              => 'text',
+            'meta_pixel_id'       => 'text',
+            // GoHighLevel
+            'ghl_api_key'         => 'text',
+            'ghl_location_id'     => 'text',
             // AI
-            'anthropic_api_key'  => 'text',
-            'ai_model'           => 'text',
-            'input_placeholder'  => 'text',
+            'anthropic_api_key'   => 'text',
+            'ai_model'            => 'text',
+            'input_placeholder'   => 'text',
+            'min_exchanges'       => 'int',
+            'max_response_tokens' => 'int',
+            'transcript_subject'  => 'text',
+            'bcc_email'           => 'email',
         ];
 
         foreach ( $text_fields as $field => $type ) {
@@ -1501,6 +1848,8 @@ function ideabot_settings_page() {
             'q_email', 'q_phone',
             // AI
             'chat_welcome', 'system_prompt',
+            // Business Hours
+            'offline_message',
         ];
 
         foreach ( $html_textareas as $ta ) {
@@ -1777,6 +2126,24 @@ function ideabot_settings_page() {
                     </div>
                 </div>
 
+                <!-- BCC -->
+                <div class="ib-section"><h3>📬 Delivery Options</h3>
+                    <div class="ib-row">
+                        <div class="ib-label">BCC All Emails</div>
+                        <div><input type="email" name="bcc_email" value="<?php echo ideabot_field_val('bcc_email'); ?>" placeholder="Optional — blind-copy address">
+                        <div class="ib-desc">BCC'd on every outgoing email (team notification + visitor follow-up).</div></div>
+                    </div>
+                    <div class="ib-row">
+                        <div class="ib-label">Send Transcript to Visitor</div>
+                        <div><label><input type="checkbox" name="send_transcript" value="1" <?php ideabot_field_chk('send_transcript'); ?>> Email the full chat transcript to the visitor after they submit</label></div>
+                    </div>
+                    <div class="ib-row">
+                        <div class="ib-label">Transcript Subject</div>
+                        <div><input type="text" name="transcript_subject" value="<?php echo ideabot_field_val('transcript_subject'); ?>">
+                        <div class="ib-desc">Subject line for the transcript email sent to the visitor.</div></div>
+                    </div>
+                </div>
+
                 <!-- TEST EMAIL -->
                 <div class="ib-section"><h3>🧪 Test Email</h3>
                     <div class="ib-row">
@@ -1818,6 +2185,81 @@ function ideabot_settings_page() {
                         <div class="ib-desc">Comma-separated WordPress page/post IDs where the bot should NOT appear.</div></div>
                     </div>
                 </div>
+                <div class="ib-section"><h3>🎨 Chat Window</h3>
+                    <div class="ib-row">
+                        <div class="ib-label">Window Height</div>
+                        <div><input type="number" name="chat_height" value="<?php echo ideabot_field_val('chat_height'); ?>" min="300" max="800" style="max-width:100px;"> px
+                        <div class="ib-desc">Height of the chat window in pixels. Default 480px.</div></div>
+                    </div>
+                    <div class="ib-row">
+                        <div class="ib-label">Show Timestamps</div>
+                        <div><label><input type="checkbox" name="show_timestamps" value="1" <?php ideabot_field_chk('show_timestamps'); ?>> Show time on each message bubble</label></div>
+                    </div>
+                    <div class="ib-row">
+                        <div class="ib-label">Disable Typing Animation</div>
+                        <div><label><input type="checkbox" name="disable_typing_anim" value="1" <?php ideabot_field_chk('disable_typing_anim'); ?>> Hide the "…" typing indicator while ideaBot thinks</label></div>
+                    </div>
+                </div>
+                <div class="ib-section"><h3>🕐 Business Hours</h3>
+                    <div class="ib-row">
+                        <div class="ib-label">Enable Business Hours</div>
+                        <div><label><input type="checkbox" name="hours_enabled" value="1" <?php ideabot_field_chk('hours_enabled'); ?>> Only show bot during specified hours</label>
+                        <div class="ib-desc">Outside hours, shows the offline message instead of the full chat.</div></div>
+                    </div>
+                    <div class="ib-row">
+                        <div class="ib-label">Hours</div>
+                        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+                            <input type="time" name="hours_start" value="<?php echo ideabot_field_val('hours_start'); ?>" style="max-width:120px;">
+                            <span style="color:#888;">to</span>
+                            <input type="time" name="hours_end" value="<?php echo ideabot_field_val('hours_end'); ?>" style="max-width:120px;">
+                        </div>
+                    </div>
+                    <div class="ib-row">
+                        <div class="ib-label">Days</div>
+                        <div style="display:flex;gap:12px;flex-wrap:wrap;">
+                            <?php
+                            $active_days = array_map('trim', explode(',', ideabot_get('hours_days','1,2,3,4,5')));
+                            $day_labels  = ['1'=>'Mon','2'=>'Tue','3'=>'Wed','4'=>'Thu','5'=>'Fri','6'=>'Sat','0'=>'Sun'];
+                            foreach ( $day_labels as $val => $lbl ) :
+                            ?>
+                            <label style="font-size:12px;"><input type="checkbox" name="hours_days_<?php echo $val; ?>" value="<?php echo $val; ?>" <?php checked( in_array($val, $active_days) ); ?>> <?php echo $lbl; ?></label>
+                            <?php endforeach; ?>
+                            <input type="hidden" name="hours_days" id="ib-hours-days-hidden" value="<?php echo ideabot_field_val('hours_days'); ?>">
+                        </div>
+                        <div class="ib-desc">Days when the bot is active.</div>
+                    </div>
+                    <div class="ib-row">
+                        <div class="ib-label">Timezone</div>
+                        <div>
+                            <select name="hours_timezone" style="max-width:240px;">
+                                <?php
+                                $tz_list = [
+                                    'America/New_York'    => 'Eastern (ET)',
+                                    'America/Chicago'     => 'Central (CT)',
+                                    'America/Denver'      => 'Mountain (MT)',
+                                    'America/Los_Angeles' => 'Pacific (PT)',
+                                    'America/Phoenix'     => 'Arizona (MST)',
+                                    'America/Anchorage'   => 'Alaska (AKT)',
+                                    'Pacific/Honolulu'    => 'Hawaii (HST)',
+                                    'Europe/London'       => 'London (GMT/BST)',
+                                    'Europe/Paris'        => 'Central European (CET)',
+                                    'Australia/Sydney'    => 'Sydney (AEST)',
+                                    'UTC'                 => 'UTC',
+                                ];
+                                $cur_tz = ideabot_get('hours_timezone','America/New_York');
+                                foreach ( $tz_list as $tz_val => $tz_lbl ) :
+                                ?>
+                                <option value="<?php echo esc_attr($tz_val); ?>" <?php selected($cur_tz,$tz_val); ?>><?php echo esc_html($tz_lbl); ?></option>
+                                <?php endforeach; ?>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="ib-row">
+                        <div class="ib-label">Offline Message</div>
+                        <div><textarea name="offline_message"><?php echo ideabot_field_ta('offline_message'); ?></textarea>
+                        <div class="ib-desc">Shown inside the chat window when outside business hours.</div></div>
+                    </div>
+                </div>
                 <div class="ib-section"><h3>🔧 Advanced</h3>
                     <div class="ib-row">
                         <div class="ib-label">Z-Index</div>
@@ -1846,6 +2288,58 @@ function ideabot_settings_page() {
                         <strong>Payload fields (JSON):</strong> <code>first_name, industry, revenue_range, biggest_challenge, ai_experience, team_size, timeline, win_definition, email, phone, source, site</code><br><br>
                         Works with <strong>Zapier</strong>, <strong>Make</strong>, <strong>GoHighLevel</strong>, <strong>n8n</strong>, or any webhook-compatible service.
                     </div>
+                </div>
+
+                <!-- SLACK -->
+                <div class="ib-section"><h3>💬 Slack Notifications</h3>
+                    <div class="ib-row">
+                        <div class="ib-label">Enable Slack Alerts</div>
+                        <div><label><input type="checkbox" name="slack_enabled" value="1" <?php ideabot_field_chk('slack_enabled'); ?>> Post a message to Slack on every new lead</label></div>
+                    </div>
+                    <div class="ib-row">
+                        <div class="ib-label">Slack Webhook URL</div>
+                        <div><input type="url" name="slack_webhook_url" value="<?php echo ideabot_field_val('slack_webhook_url'); ?>" placeholder="https://hooks.slack.com/services/…">
+                        <div class="ib-desc">Create at <a href="https://api.slack.com/messaging/webhooks" target="_blank" style="color:#00C2FF;">Slack API → Incoming Webhooks</a>.</div></div>
+                    </div>
+                    <div class="ib-row">
+                        <div class="ib-label">Minimum Lead Score</div>
+                        <div><input type="number" name="slack_min_score" value="<?php echo ideabot_field_val('slack_min_score'); ?>" min="0" max="10" style="max-width:80px;"> / 10
+                        <div class="ib-desc">Only fire Slack alert if lead score ≥ this value. 0 = always notify.</div></div>
+                    </div>
+                </div>
+
+                <!-- ANALYTICS -->
+                <div class="ib-section"><h3>📊 Analytics Tracking</h3>
+                    <div class="ib-note">When set, ideaBot fires <code>gtag()</code> / pixel events on: <strong>chat_opened</strong>, <strong>message_sent</strong>, <strong>lead_captured</strong>.</div>
+                    <div class="ib-row" style="margin-top:12px;">
+                        <div class="ib-label">GA4 Measurement ID</div>
+                        <div><input type="text" name="ga4_id" value="<?php echo ideabot_field_val('ga4_id'); ?>" placeholder="G-XXXXXXXXXX">
+                        <div class="ib-desc">Your Google Analytics 4 Measurement ID. ideaBot fires events automatically if set.</div></div>
+                    </div>
+                    <div class="ib-row">
+                        <div class="ib-label">Meta Pixel ID</div>
+                        <div><input type="text" name="meta_pixel_id" value="<?php echo ideabot_field_val('meta_pixel_id'); ?>" placeholder="1234567890">
+                        <div class="ib-desc">Facebook/Meta Pixel ID. Fires <code>track('Lead')</code> event when email is captured.</div></div>
+                    </div>
+                </div>
+
+                <!-- GOHIGHLEVEL -->
+                <div class="ib-section"><h3>🚀 GoHighLevel CRM</h3>
+                    <div class="ib-row">
+                        <div class="ib-label">Enable GHL Sync</div>
+                        <div><label><input type="checkbox" name="ghl_enabled" value="1" <?php ideabot_field_chk('ghl_enabled'); ?>> Create a contact in GoHighLevel on every new lead</label></div>
+                    </div>
+                    <div class="ib-row">
+                        <div class="ib-label">API Key</div>
+                        <div><input type="password" name="ghl_api_key" value="<?php echo ideabot_field_val('ghl_api_key'); ?>" placeholder="GHL Private API Key" autocomplete="new-password">
+                        <div class="ib-desc">Found in GHL → Settings → Integrations → API Key.</div></div>
+                    </div>
+                    <div class="ib-row">
+                        <div class="ib-label">Location ID</div>
+                        <div><input type="text" name="ghl_location_id" value="<?php echo ideabot_field_val('ghl_location_id'); ?>" placeholder="GHL Location / Sub-account ID">
+                        <div class="ib-desc">Found in GHL → Settings → Business Profile.</div></div>
+                    </div>
+                    <div class="ib-note">Contact is created with all extracted fields and tagged <code>ideabot-lead</code>. Map custom fields in GHL to receive industry, challenge, score, etc.</div>
                 </div>
 
                 <!-- AUTO-DEPLOY -->
@@ -1944,6 +2438,26 @@ function ideabot_settings_page() {
                         <div class="ib-desc">Hint text shown in the text input field.</div></div>
                     </div>
                 </div>
+                <div class="ib-section"><h3>⚙️ Conversation Settings</h3>
+                    <div class="ib-row">
+                        <div class="ib-label">Ask for Email After</div>
+                        <div>
+                            <div style="display:flex;align-items:center;gap:8px;">
+                                <input type="number" name="min_exchanges" value="<?php echo ideabot_field_val('min_exchanges'); ?>" min="1" max="20" style="max-width:70px;"> exchanges
+                            </div>
+                            <div class="ib-desc">Minimum back-and-forth messages before ideaBot asks for the visitor's name and email. Default 3.</div>
+                        </div>
+                    </div>
+                    <div class="ib-row">
+                        <div class="ib-label">Max Response Length</div>
+                        <div>
+                            <div style="display:flex;align-items:center;gap:8px;">
+                                <input type="number" name="max_response_tokens" value="<?php echo ideabot_field_val('max_response_tokens'); ?>" min="256" max="4096" step="128" style="max-width:90px;"> tokens
+                            </div>
+                            <div class="ib-desc">Max tokens per AI response. 1024 = ~750 words. Higher = longer answers, higher API cost.</div>
+                        </div>
+                    </div>
+                </div>
                 <div class="ib-section"><h3>🧠 Knowledge Base &amp; System Prompt</h3>
                     <div class="ib-desc" style="margin-bottom:12px;">This is what the AI knows about ideaBoss. It is pre-loaded with your full knowledge base — edit to add pricing, case studies, FAQs, or anything specific. Leave blank to use the default.</div>
                     <textarea name="system_prompt" style="width:100%;min-height:340px;font-size:12px;font-family:monospace;padding:10px;border:1px solid #ccc;border-radius:5px;resize:vertical;box-sizing:border-box;"><?php echo esc_textarea( ideabot_get('system_prompt','') ?: ideabot_default_system_prompt() ); ?></textarea>
@@ -1973,6 +2487,20 @@ function ideabot_settings_page() {
                 var el = document.getElementById('panel-' + this.dataset.panel);
                 if (el) el.classList.add('active');
             });
+        });
+
+        // Business hours — sync day checkboxes to hidden field
+        function ibSyncDays() {
+            var vals = [];
+            ['0','1','2','3','4','5','6'].forEach(function(d) {
+                var cb = document.querySelector('input[name="hours_days_' + d + '"]');
+                if (cb && cb.checked) vals.push(d);
+            });
+            var hf = document.getElementById('ib-hours-days-hidden');
+            if (hf) hf.value = vals.join(',');
+        }
+        document.querySelectorAll('[name^="hours_days_"]').forEach(function(cb) {
+            cb.addEventListener('change', ibSyncDays);
         });
 
         // Copy deploy webhook URL
@@ -2054,9 +2582,28 @@ function ideabot_export_csv( $leads ) {
     header( 'Content-Disposition: attachment; filename="ideabot-leads-' . date( 'Y-m-d' ) . '.csv"' );
     $out = fopen( 'php://output', 'w' );
     fputs( $out, "\xEF\xBB\xBF" );
-    fputcsv( $out, [ 'Date', 'First Name', 'Email', 'Phone', 'Industry', 'Revenue Range', 'Biggest Challenge', 'AI Experience', 'Team Size', 'Timeline', '90-Day Win' ] );
+    fputcsv( $out, [ 'Date', 'Score', 'First Name', 'Last Name', 'Company', 'Email', 'Phone', 'Website', 'Industry', 'Revenue Range', 'Budget Range', 'Biggest Challenge', 'Current Tools', 'AI Experience', 'Team Size', 'Timeline', '90-Day Win', 'Source Page' ] );
     foreach ( $leads as $l ) {
-        fputcsv( $out, [ $l->created_at, $l->first_name, $l->email, $l->phone, $l->industry, $l->revenue_range, $l->biggest_challenge, $l->ai_experience, $l->team_size ?? '', $l->timeline, $l->win_definition ] );
+        fputcsv( $out, [
+            $l->created_at,
+            $l->lead_score          ?? 0,
+            $l->first_name,
+            $l->last_name           ?? '',
+            $l->company_name        ?? '',
+            $l->email,
+            $l->phone,
+            $l->website             ?? '',
+            $l->industry,
+            $l->revenue_range,
+            $l->budget_range        ?? '',
+            $l->biggest_challenge,
+            $l->current_tools       ?? '',
+            $l->ai_experience,
+            $l->team_size           ?? '',
+            $l->timeline,
+            $l->win_definition,
+            $l->source_page         ?? '',
+        ] );
     }
     fclose( $out );
 }
