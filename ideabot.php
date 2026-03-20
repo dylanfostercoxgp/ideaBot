@@ -3,7 +3,7 @@
  * Plugin Name: ideaBot
  * Plugin URI:  https://ideaboss.io
  * Description: ideaBot by ideaBoss — a conversational lead qualification chat widget. Walks visitors through a guided discovery conversation, captures qualified leads, and sends personalized follow-up emails automatically.
- * Version:     1.1.2
+ * Version:     1.1.3
  * Author:      ideaBoss / Cox Group
  * Author URI:  https://ideaboss.io
  * License:     GPL v2 or later
@@ -12,7 +12,7 @@
 
 if ( ! defined( 'ABSPATH' ) ) exit;
 
-define( 'IDEABOT_VERSION',     '1.1.2' );
+define( 'IDEABOT_VERSION',     '1.1.3' );
 define( 'IDEABOT_DB_VER',      '1.0.2' );
 define( 'IDEABOT_DIR',         plugin_dir_path( __FILE__ ) );
 define( 'IDEABOT_URL',         plugin_dir_url( __FILE__ ) );
@@ -350,6 +350,290 @@ Ask for both name and email in one natural ask. Only ask once. If they decline o
 }
 
 // ================================================================
+// KNOWLEDGE BASE — FILE STORAGE HELPERS
+// Files are stored as a JSON array in option `ideabot_kb_files`.
+// Each entry: { name, ext, size_label, content, added }
+// ================================================================
+function ideabot_get_kb_files() {
+    $raw = get_option( 'ideabot_kb_files', '[]' );
+    $arr = json_decode( $raw, true );
+    return is_array( $arr ) ? $arr : [];
+}
+function ideabot_save_kb_files( $files ) {
+    update_option( 'ideabot_kb_files', wp_json_encode( $files ), false );
+}
+
+/**
+ * Build the system prompt that includes any uploaded KB files.
+ * Appended after the main system prompt / knowledge base.
+ */
+function ideabot_get_kb_files_appendix() {
+    $files = ideabot_get_kb_files();
+    if ( empty( $files ) ) return '';
+
+    $out = "\n\n## UPLOADED KNOWLEDGE BASE DOCUMENTS\nThe following documents have been uploaded to expand your knowledge. Use them to answer questions accurately.\n\n";
+    foreach ( $files as $f ) {
+        $name    = $f['name']    ?? 'Document';
+        $content = $f['content'] ?? '';
+        if ( empty( trim( $content ) ) ) continue;
+        $out .= "### {$name}\n" . $content . "\n\n";
+    }
+    return $out;
+}
+
+// ── Text extraction from uploaded files ─────────────────────────
+function ideabot_extract_file_text( $tmp_path, $filename, $mime ) {
+    $ext     = strtolower( pathinfo( $filename, PATHINFO_EXTENSION ) );
+    $content = '';
+    $max     = 25000; // max chars per file
+
+    // Plain text formats — read directly
+    if ( in_array( $ext, [ 'txt', 'md', 'csv', 'html', 'htm', 'json', 'xml' ], true ) ) {
+        $raw = @file_get_contents( $tmp_path );
+        if ( $raw === false ) return [ 'error' => 'Could not read file.' ];
+        if ( $ext === 'html' || $ext === 'htm' ) $raw = wp_strip_all_tags( $raw );
+        return [ 'content' => substr( $raw, 0, $max ) ];
+    }
+
+    // DOCX — unzip and extract paragraph text from word/document.xml
+    if ( $ext === 'docx' ) {
+        if ( ! class_exists( 'ZipArchive' ) ) {
+            return [ 'error' => 'ZipArchive not available for DOCX reading.' ];
+        }
+        $zip = new ZipArchive();
+        if ( $zip->open( $tmp_path ) !== true ) return [ 'error' => 'Could not open DOCX.' ];
+        $xml = $zip->getFromName( 'word/document.xml' );
+        $zip->close();
+        if ( $xml === false ) return [ 'error' => 'Could not read DOCX contents.' ];
+        // Extract text from w:t tags
+        preg_match_all( '/<w:t[^>]*>([^<]*)<\/w:t>/i', $xml, $matches );
+        $content = implode( ' ', $matches[1] );
+        $content = html_entity_decode( $content, ENT_QUOTES | ENT_HTML5, 'UTF-8' );
+        return [ 'content' => substr( trim( $content ), 0, $max ) ];
+    }
+
+    // PDF — use Anthropic document API (Claude reads the PDF natively)
+    if ( $ext === 'pdf' ) {
+        $api_key = ideabot_get( 'anthropic_api_key', '' );
+        $model   = ideabot_get( 'ai_model', 'claude-haiku-4-5-20251001' );
+        if ( empty( $api_key ) ) return [ 'error' => 'Anthropic API key required for PDF reading.' ];
+
+        $raw = @file_get_contents( $tmp_path );
+        if ( $raw === false || strlen( $raw ) === 0 ) return [ 'error' => 'Could not read PDF.' ];
+        if ( strlen( $raw ) > 5 * 1024 * 1024 ) return [ 'error' => 'PDF too large (max 5 MB).' ];
+
+        $response = wp_remote_post( 'https://api.anthropic.com/v1/messages', [
+            'timeout' => 60,
+            'headers' => [
+                'Content-Type'      => 'application/json',
+                'x-api-key'         => $api_key,
+                'anthropic-version' => '2023-06-01',
+                'anthropic-beta'    => 'pdfs-2024-09-25',
+            ],
+            'body' => wp_json_encode( [
+                'model'      => $model,
+                'max_tokens' => 2048,
+                'messages'   => [ [
+                    'role'    => 'user',
+                    'content' => [
+                        [
+                            'type'   => 'document',
+                            'source' => [
+                                'type'       => 'base64',
+                                'media_type' => 'application/pdf',
+                                'data'       => base64_encode( $raw ),
+                            ],
+                        ],
+                        [
+                            'type' => 'text',
+                            'text' => 'Extract all text content from this document. Return only the extracted text, preserving structure (headings, lists, etc.) as plain text. Do not summarise — extract completely.',
+                        ],
+                    ],
+                ] ],
+            ] ),
+        ] );
+
+        if ( is_wp_error( $response ) ) return [ 'error' => 'API error: ' . $response->get_error_message() ];
+        $body = json_decode( wp_remote_retrieve_body( $response ), true );
+        $text = $body['content'][0]['text'] ?? '';
+        if ( empty( $text ) ) return [ 'error' => 'PDF extraction returned empty result.' ];
+        return [ 'content' => substr( $text, 0, $max ) ];
+    }
+
+    // Images — use Claude vision to describe / extract text
+    if ( in_array( $ext, [ 'png', 'jpg', 'jpeg', 'gif', 'webp' ], true ) ) {
+        $api_key = ideabot_get( 'anthropic_api_key', '' );
+        $model   = ideabot_get( 'ai_model', 'claude-haiku-4-5-20251001' );
+        if ( empty( $api_key ) ) return [ 'error' => 'Anthropic API key required for image reading.' ];
+
+        $raw = @file_get_contents( $tmp_path );
+        if ( $raw === false ) return [ 'error' => 'Could not read image.' ];
+        if ( strlen( $raw ) > 5 * 1024 * 1024 ) return [ 'error' => 'Image too large (max 5 MB).' ];
+
+        $mime_map  = [ 'jpg' => 'image/jpeg', 'jpeg' => 'image/jpeg', 'png' => 'image/png', 'gif' => 'image/gif', 'webp' => 'image/webp' ];
+        $mime_type = $mime_map[ $ext ] ?? 'image/png';
+
+        $response = wp_remote_post( 'https://api.anthropic.com/v1/messages', [
+            'timeout' => 60,
+            'headers' => [
+                'Content-Type'      => 'application/json',
+                'x-api-key'         => $api_key,
+                'anthropic-version' => '2023-06-01',
+            ],
+            'body' => wp_json_encode( [
+                'model'      => $model,
+                'max_tokens' => 1500,
+                'messages'   => [ [
+                    'role'    => 'user',
+                    'content' => [
+                        [
+                            'type'   => 'image',
+                            'source' => [
+                                'type'       => 'base64',
+                                'media_type' => $mime_type,
+                                'data'       => base64_encode( $raw ),
+                            ],
+                        ],
+                        [
+                            'type' => 'text',
+                            'text' => 'Describe this image in detail. If it contains text, extract it fully. If it shows a diagram, chart, infographic, or pricing table, describe its structure and content thoroughly. This will serve as reference knowledge for an AI assistant.',
+                        ],
+                    ],
+                ] ],
+            ] ),
+        ] );
+
+        if ( is_wp_error( $response ) ) return [ 'error' => 'API error: ' . $response->get_error_message() ];
+        $body = json_decode( wp_remote_retrieve_body( $response ), true );
+        $text = $body['content'][0]['text'] ?? '';
+        if ( empty( $text ) ) return [ 'error' => 'Image extraction returned empty result.' ];
+        return [ 'content' => substr( $text, 0, $max ) ];
+    }
+
+    return [ 'error' => 'Unsupported file type.' ];
+}
+
+// ── AJAX: upload one or more KB files ───────────────────────────
+add_action( 'wp_ajax_ideabot_upload_kb_file', 'ideabot_upload_kb_file' );
+function ideabot_upload_kb_file() {
+    check_ajax_referer( 'ideabot_admin_nonce', 'nonce' );
+    if ( ! current_user_can( 'manage_options' ) ) wp_send_json_error( [ 'message' => 'Unauthorized.' ] );
+
+    if ( empty( $_FILES['kb_file'] ) ) {
+        wp_send_json_error( [ 'message' => 'No file received.' ] );
+    }
+
+    $file = $_FILES['kb_file'];
+
+    // Handle multi-file array (name is array when multiple=true)
+    $names    = is_array( $file['name']     ) ? $file['name']     : [ $file['name']     ];
+    $tmps     = is_array( $file['tmp_name'] ) ? $file['tmp_name'] : [ $file['tmp_name'] ];
+    $sizes    = is_array( $file['size']     ) ? $file['size']     : [ $file['size']     ];
+    $types    = is_array( $file['type']     ) ? $file['type']     : [ $file['type']     ];
+    $errors_f = is_array( $file['error']    ) ? $file['error']    : [ $file['error']    ];
+
+    $allowed_ext = [ 'txt','md','csv','html','htm','json','xml','docx','pdf','png','jpg','jpeg','gif','webp' ];
+    $results     = [];
+    $kb_files    = ideabot_get_kb_files();
+
+    foreach ( $names as $i => $raw_name ) {
+        if ( $errors_f[$i] !== UPLOAD_ERR_OK ) {
+            $results[] = [ 'name' => $raw_name, 'status' => 'error', 'message' => 'Upload error code ' . $errors_f[$i] ];
+            continue;
+        }
+
+        $filename  = sanitize_file_name( $raw_name );
+        $ext       = strtolower( pathinfo( $filename, PATHINFO_EXTENSION ) );
+        $tmp_path  = $tmps[$i];
+        $size_bytes = (int) $sizes[$i];
+        $mime       = $types[$i];
+
+        if ( ! in_array( $ext, $allowed_ext, true ) ) {
+            $results[] = [ 'name' => $filename, 'status' => 'error', 'message' => 'File type .' . $ext . ' is not supported.' ];
+            continue;
+        }
+        if ( $size_bytes > 10 * 1024 * 1024 ) {
+            $results[] = [ 'name' => $filename, 'status' => 'error', 'message' => 'File exceeds 10 MB limit.' ];
+            continue;
+        }
+        if ( ! is_uploaded_file( $tmp_path ) ) {
+            $results[] = [ 'name' => $filename, 'status' => 'error', 'message' => 'Invalid upload.' ];
+            continue;
+        }
+
+        $extracted = ideabot_extract_file_text( $tmp_path, $filename, $mime );
+
+        if ( isset( $extracted['error'] ) ) {
+            $results[] = [ 'name' => $filename, 'status' => 'error', 'message' => $extracted['error'] ];
+            continue;
+        }
+
+        $size_label = $size_bytes < 1024
+            ? $size_bytes . ' B'
+            : ( $size_bytes < 1024 * 1024
+                ? round( $size_bytes / 1024, 1 ) . ' KB'
+                : round( $size_bytes / 1024 / 1024, 1 ) . ' MB' );
+
+        $kb_files[] = [
+            'name'    => $filename,
+            'ext'     => $ext,
+            'size'    => $size_label,
+            'content' => $extracted['content'],
+            'chars'   => strlen( $extracted['content'] ),
+            'added'   => current_time( 'Y-m-d H:i' ),
+        ];
+
+        $results[] = [ 'name' => $filename, 'status' => 'success', 'size' => $size_label, 'chars' => strlen( $extracted['content'] ) ];
+    }
+
+    ideabot_save_kb_files( $kb_files );
+
+    wp_send_json_success( [
+        'results'    => $results,
+        'total_files'=> count( $kb_files ),
+        'files'      => $kb_files,
+    ] );
+}
+
+// ── AJAX: remove a KB file by index ─────────────────────────────
+add_action( 'wp_ajax_ideabot_remove_kb_file', 'ideabot_remove_kb_file' );
+function ideabot_remove_kb_file() {
+    check_ajax_referer( 'ideabot_admin_nonce', 'nonce' );
+    if ( ! current_user_can( 'manage_options' ) ) wp_send_json_error();
+
+    $idx   = (int) ( $_POST['idx'] ?? -1 );
+    $files = ideabot_get_kb_files();
+
+    if ( $idx < 0 || $idx >= count( $files ) ) {
+        wp_send_json_error( [ 'message' => 'Invalid index.' ] );
+    }
+
+    array_splice( $files, $idx, 1 );
+    ideabot_save_kb_files( $files );
+    wp_send_json_success( [ 'files' => $files ] );
+}
+
+// ── AJAX: clear all KB files ─────────────────────────────────────
+add_action( 'wp_ajax_ideabot_clear_kb_files', 'ideabot_clear_kb_files' );
+function ideabot_clear_kb_files() {
+    check_ajax_referer( 'ideabot_admin_nonce', 'nonce' );
+    if ( ! current_user_can( 'manage_options' ) ) wp_send_json_error();
+    ideabot_save_kb_files( [] );
+    wp_send_json_success();
+}
+
+// ── AJAX: render file list HTML for live refresh ─────────────────
+add_action( 'wp_ajax_ideabot_render_kb_list_ajax', 'ideabot_render_kb_list_ajax' );
+function ideabot_render_kb_list_ajax() {
+    check_ajax_referer( 'ideabot_admin_nonce', 'nonce' );
+    if ( ! current_user_can( 'manage_options' ) ) wp_send_json_error();
+    ob_start();
+    ideabot_render_kb_file_list( ideabot_get_kb_files() );
+    $html = ob_get_clean();
+    wp_send_json_success( [ 'html' => $html ] );
+}
+
+// ================================================================
 // AI FIELD EXTRACTION — Parse lead data from conversation transcript
 // Calls Claude to extract structured fields so nothing is left blank.
 // ================================================================
@@ -447,8 +731,10 @@ function ideabot_chat() {
     $model = ideabot_get( 'ai_model', 'claude-haiku-4-5-20251001' );
 
     // System prompt: use saved custom prompt or fallback to default knowledge base
+    // Then append any uploaded KB file content
     $saved_prompt = ideabot_get( 'system_prompt', '' );
     $system       = ( ! empty( trim( $saved_prompt ) ) ) ? $saved_prompt : ideabot_default_system_prompt();
+    $system      .= ideabot_get_kb_files_appendix();
 
     // Build messages array (limit to last 20 to control cost)
     $messages   = array_merge( $history, [ [ 'role' => 'user', 'content' => $message ] ] );
@@ -2458,10 +2744,92 @@ function ideabot_settings_page() {
                         </div>
                     </div>
                 </div>
-                <div class="ib-section"><h3>🧠 Knowledge Base &amp; System Prompt</h3>
-                    <div class="ib-desc" style="margin-bottom:12px;">This is what the AI knows about ideaBoss. It is pre-loaded with your full knowledge base — edit to add pricing, case studies, FAQs, or anything specific. Leave blank to use the default.</div>
+                <!-- ══ KB FILE UPLOAD ══ -->
+                <div class="ib-section"><h3>📁 Knowledge Base Files</h3>
+                    <div class="ib-desc" style="margin-bottom:14px;">
+                        Upload documents, PDFs, or images to expand ideaBot's knowledge. The AI reads them automatically — no copy-pasting needed.<br>
+                        <strong>Supported:</strong> .md · .txt · .pdf · .docx · .csv · .html · .png · .jpg · .gif · .webp &nbsp;|&nbsp; <strong>Max 10 MB per file</strong>
+                    </div>
+
+                    <!-- Drop Zone -->
+                    <div id="ib-kb-dropzone">
+                        <div id="ib-kb-drop-inner">
+                            <div style="font-size:32px;line-height:1;margin-bottom:8px;">📄</div>
+                            <div style="font-size:14px;font-weight:600;color:#333;">Drag & drop files here</div>
+                            <div style="font-size:12px;color:#999;margin:4px 0 12px;">or</div>
+                            <label for="ib-kb-file-input" class="button button-secondary" style="cursor:pointer;">Choose Files</label>
+                            <input type="file" id="ib-kb-file-input" multiple
+                                accept=".md,.txt,.pdf,.docx,.csv,.html,.htm,.json,.xml,.png,.jpg,.jpeg,.gif,.webp"
+                                style="display:none;">
+                        </div>
+                    </div>
+
+                    <!-- Upload progress -->
+                    <div id="ib-kb-progress" style="display:none;margin-top:12px;">
+                        <div style="display:flex;align-items:center;gap:10px;padding:12px 16px;background:#f0f8ff;border:1px solid #b3d9f5;border-radius:6px;font-size:13px;color:#0066aa;">
+                            <span class="ib-kb-spinner">⟳</span>
+                            <span id="ib-kb-progress-text">Processing files…</span>
+                        </div>
+                    </div>
+
+                    <!-- Upload results -->
+                    <div id="ib-kb-upload-results" style="margin-top:10px;"></div>
+
+                    <!-- Stored file list -->
+                    <div id="ib-kb-file-list" style="margin-top:16px;">
+                        <?php
+                        $kb_files = ideabot_get_kb_files();
+                        ideabot_render_kb_file_list( $kb_files );
+                        ?>
+                    </div>
+
+                    <style>
+                    #ib-kb-dropzone {
+                        border: 2px dashed #ddd;
+                        border-radius: 8px;
+                        padding: 28px 24px;
+                        text-align: center;
+                        background: #fafafa;
+                        transition: all .2s;
+                        cursor: pointer;
+                    }
+                    #ib-kb-dropzone.drag-over {
+                        border-color: #00C2FF;
+                        background: #f0fbff;
+                    }
+                    #ib-kb-drop-inner { pointer-events: none; }
+                    .ib-kb-spinner { display: inline-block; animation: ib-spin 1s linear infinite; font-size: 18px; }
+                    @keyframes ib-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+                    .ib-kb-file-row {
+                        display: flex;
+                        align-items: flex-start;
+                        gap: 12px;
+                        padding: 12px 14px;
+                        background: #fff;
+                        border: 1px solid #e8e8e8;
+                        border-radius: 6px;
+                        margin-bottom: 6px;
+                    }
+                    .ib-kb-file-icon { font-size: 20px; flex-shrink: 0; padding-top: 2px; }
+                    .ib-kb-file-info { flex: 1; min-width: 0; }
+                    .ib-kb-file-name { font-size: 13px; font-weight: 600; color: #111; word-break: break-all; }
+                    .ib-kb-file-meta { font-size: 11px; color: #999; margin-top: 2px; }
+                    .ib-kb-file-preview { font-size: 11px; color: #666; margin-top: 5px; font-family: monospace; background: #f5f5f5; padding: 5px 8px; border-radius: 4px; max-height: 48px; overflow: hidden; line-height: 1.4; }
+                    .ib-kb-remove-btn { flex-shrink: 0; background: none; border: none; color: #ccc; font-size: 16px; cursor: pointer; padding: 0 4px; line-height: 1; }
+                    .ib-kb-remove-btn:hover { color: #c62828; }
+                    .ib-kb-empty { text-align: center; padding: 16px; color: #aaa; font-size: 13px; border: 1px dashed #eee; border-radius: 6px; }
+                    #ib-kb-clear-all { margin-top: 8px; }
+                    </style>
+                </div>
+
+                <!-- ══ MANUAL SYSTEM PROMPT ══ -->
+                <div class="ib-section"><h3>✏️ Manual System Prompt</h3>
+                    <div class="ib-desc" style="margin-bottom:12px;">
+                        Pre-loaded with your full ideaBoss knowledge base. Edit freely — or leave blank to use the default.
+                        <strong>Uploaded files above are appended automatically</strong> and do not need to be pasted here.
+                    </div>
                     <textarea name="system_prompt" style="width:100%;min-height:340px;font-size:12px;font-family:monospace;padding:10px;border:1px solid #ccc;border-radius:5px;resize:vertical;box-sizing:border-box;"><?php echo esc_textarea( ideabot_get('system_prompt','') ?: ideabot_default_system_prompt() ); ?></textarea>
-                    <div class="ib-desc" style="margin-top:6px;">The AI always follows these instructions. Include your services, pricing, FAQs, brand voice, and any rules for how it should respond.</div>
+                    <div class="ib-desc" style="margin-top:6px;">Brand voice, pricing rules, FAQs, service descriptions. The AI always follows these instructions.</div>
                 </div>
             </div></div>
 
@@ -2488,6 +2856,159 @@ function ideabot_settings_page() {
                 if (el) el.classList.add('active');
             });
         });
+
+        // ── Knowledge Base File Upload ──────────────────────────────
+        (function(){
+            var AJAX       = '<?php echo esc_js( admin_url("admin-ajax.php") ); ?>';
+            var NONCE      = '<?php echo esc_js( wp_create_nonce("ideabot_admin_nonce") ); ?>';
+            var dropzone   = document.getElementById('ib-kb-dropzone');
+            var fileInput  = document.getElementById('ib-kb-file-input');
+            var progress   = document.getElementById('ib-kb-progress');
+            var progText   = document.getElementById('ib-kb-progress-text');
+            var resultDiv  = document.getElementById('ib-kb-upload-results');
+            var listDiv    = document.getElementById('ib-kb-file-list');
+
+            if (!dropzone) return; // not on AI tab
+
+            // Click on dropzone triggers file picker
+            dropzone.addEventListener('click', function(e) {
+                if (e.target.tagName !== 'LABEL' && e.target.tagName !== 'INPUT')
+                    fileInput.click();
+            });
+
+            // Drag events
+            dropzone.addEventListener('dragover', function(e) {
+                e.preventDefault(); dropzone.classList.add('drag-over');
+            });
+            dropzone.addEventListener('dragleave', function() {
+                dropzone.classList.remove('drag-over');
+            });
+            dropzone.addEventListener('drop', function(e) {
+                e.preventDefault();
+                dropzone.classList.remove('drag-over');
+                handleFiles(e.dataTransfer.files);
+            });
+
+            // File input change
+            fileInput.addEventListener('change', function() {
+                if (this.files.length) handleFiles(this.files);
+                this.value = '';
+            });
+
+            function handleFiles(files) {
+                if (!files || files.length === 0) return;
+
+                var fd = new FormData();
+                fd.append('action', 'ideabot_upload_kb_file');
+                fd.append('nonce',  NONCE);
+                for (var i = 0; i < files.length; i++) {
+                    fd.append('kb_file[]', files[i]);
+                }
+
+                progress.style.display = 'block';
+                progText.textContent   = 'Processing ' + files.length + ' file' + (files.length > 1 ? 's' : '') + '…';
+                resultDiv.innerHTML    = '';
+
+                fetch(AJAX, { method: 'POST', body: fd, credentials: 'same-origin' })
+                    .then(function(r) { return r.json(); })
+                    .then(function(res) {
+                        progress.style.display = 'none';
+                        if (res.success) {
+                            showResults(res.data.results);
+                            refreshList(res.data.files);
+                        } else {
+                            showError((res.data && res.data.message) || 'Upload failed.');
+                        }
+                    })
+                    .catch(function() {
+                        progress.style.display = 'none';
+                        showError('Network error during upload.');
+                    });
+            }
+
+            function showResults(results) {
+                if (!results || results.length === 0) return;
+                var html = '<div style="margin-bottom:10px;">';
+                results.forEach(function(r) {
+                    if (r.status === 'success') {
+                        html += '<div style="padding:6px 12px;background:#e8f5e9;border:1px solid #a5d6a7;border-radius:4px;font-size:12.5px;color:#2e7d32;margin-bottom:4px;">'
+                              + '✅ <strong>' + escH(r.name) + '</strong> — extracted ' + r.chars.toLocaleString() + ' chars</div>';
+                    } else {
+                        html += '<div style="padding:6px 12px;background:#ffebee;border:1px solid #ef9a9a;border-radius:4px;font-size:12.5px;color:#c62828;margin-bottom:4px;">'
+                              + '❌ <strong>' + escH(r.name) + '</strong> — ' + escH(r.message) + '</div>';
+                    }
+                });
+                html += '</div>';
+                resultDiv.innerHTML = html;
+                setTimeout(function() { resultDiv.innerHTML = ''; }, 8000);
+            }
+
+            function showError(msg) {
+                resultDiv.innerHTML = '<div style="padding:8px 12px;background:#ffebee;border:1px solid #ef9a9a;border-radius:4px;font-size:12.5px;color:#c62828;margin-bottom:8px;">❌ ' + escH(msg) + '</div>';
+            }
+
+            function refreshList(files) {
+                // Re-render file list via PHP-rendered HTML — just reload the section
+                var fd = new FormData();
+                fd.append('action', 'ideabot_render_kb_list_ajax');
+                fd.append('nonce', NONCE);
+                fetch(AJAX, { method: 'POST', body: fd, credentials: 'same-origin' })
+                    .then(function(r) { return r.json(); })
+                    .then(function(res) {
+                        if (res.success) listDiv.innerHTML = res.data.html;
+                        bindRemoveButtons();
+                    })
+                    .catch(function() {});
+            }
+
+            function bindRemoveButtons() {
+                // Remove individual file
+                listDiv.querySelectorAll('.ib-kb-remove-btn').forEach(function(btn) {
+                    btn.addEventListener('click', function() {
+                        var idx = parseInt(this.getAttribute('data-idx'), 10);
+                        removeFile(idx);
+                    });
+                });
+                // Clear all
+                var clearBtn = document.getElementById('ib-kb-clear-all');
+                if (clearBtn) {
+                    clearBtn.addEventListener('click', function() {
+                        if (!confirm('Remove all knowledge base files?')) return;
+                        clearAll();
+                    });
+                }
+            }
+
+            function removeFile(idx) {
+                var fd = new FormData();
+                fd.append('action', 'ideabot_remove_kb_file');
+                fd.append('nonce', NONCE);
+                fd.append('idx', idx);
+                fetch(AJAX, { method: 'POST', body: fd, credentials: 'same-origin' })
+                    .then(function(r) { return r.json(); })
+                    .then(function(res) {
+                        if (res.success) refreshList(res.data.files);
+                    });
+            }
+
+            function clearAll() {
+                var fd = new FormData();
+                fd.append('action', 'ideabot_clear_kb_files');
+                fd.append('nonce', NONCE);
+                fetch(AJAX, { method: 'POST', body: fd, credentials: 'same-origin' })
+                    .then(function(r) { return r.json(); })
+                    .then(function(res) {
+                        if (res.success) listDiv.innerHTML = '<div class="ib-kb-empty">No files uploaded yet. Drag & drop above to get started.</div>';
+                    });
+            }
+
+            function escH(s) {
+                return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+            }
+
+            // Bind remove buttons on initial load
+            bindRemoveButtons();
+        })();
 
         // Business hours — sync day checkboxes to hidden field
         function ibSyncDays() {
@@ -2572,6 +3093,54 @@ function ideabot_settings_page() {
     })();
     </script>
     <?php
+}
+
+// ================================================================
+// KNOWLEDGE BASE — RENDER FILE LIST (used in settings page + AJAX)
+// ================================================================
+function ideabot_render_kb_file_list( $files ) {
+    $ext_icons = [
+        'pdf'  => '📕', 'docx' => '📘', 'doc'  => '📘',
+        'md'   => '📝', 'txt'  => '📄', 'csv'  => '📊',
+        'html' => '🌐', 'htm'  => '🌐', 'json' => '🔧', 'xml' => '🔧',
+        'png'  => '🖼',  'jpg'  => '🖼',  'jpeg' => '🖼',
+        'gif'  => '🖼',  'webp' => '🖼',
+    ];
+
+    if ( empty( $files ) ) {
+        echo '<div class="ib-kb-empty">No files uploaded yet. Drag & drop above to get started.</div>';
+        return;
+    }
+
+    echo '<div style="margin-bottom:6px;font-size:12px;font-weight:600;color:#555;">'
+       . count( $files ) . ' file' . ( count( $files ) !== 1 ? 's' : '' ) . ' in knowledge base &nbsp;'
+       . '<span id="ib-kb-total-chars" style="color:#aaa;font-weight:400;">'
+       . number_format( array_sum( array_column( $files, 'chars' ) ) ) . ' chars</span>'
+       . '</div>';
+
+    foreach ( $files as $i => $f ) {
+        $ext     = $f['ext']     ?? 'txt';
+        $icon    = $ext_icons[ $ext ] ?? '📄';
+        $name    = esc_html( $f['name']  ?? 'Unknown' );
+        $size    = esc_html( $f['size']  ?? '' );
+        $chars   = number_format( (int) ( $f['chars'] ?? 0 ) );
+        $added   = esc_html( $f['added'] ?? '' );
+        $preview = esc_html( substr( $f['content'] ?? '', 0, 120 ) ) . ( strlen( $f['content'] ?? '' ) > 120 ? '…' : '' );
+
+        echo "<div class='ib-kb-file-row' id='ib-kb-file-{$i}'>
+                <div class='ib-kb-file-icon'>{$icon}</div>
+                <div class='ib-kb-file-info'>
+                    <div class='ib-kb-file-name'>{$name}</div>
+                    <div class='ib-kb-file-meta'>{$size} &nbsp;·&nbsp; {$chars} chars &nbsp;·&nbsp; Added {$added}</div>
+                    <div class='ib-kb-file-preview'>{$preview}</div>
+                </div>
+                <button type='button' class='ib-kb-remove-btn' data-idx='{$i}' title='Remove'>✕</button>
+              </div>";
+    }
+
+    if ( count( $files ) > 1 ) {
+        echo '<button type="button" id="ib-kb-clear-all" class="button" style="margin-top:8px;color:#c62828;border-color:#c62828;">🗑 Clear All Files</button>';
+    }
 }
 
 // ================================================================
